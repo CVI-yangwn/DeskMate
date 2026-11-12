@@ -646,11 +646,12 @@ export class BrainService {
   private pickProactiveEvent(idleSec: number, now: number): string | null {
     if (this.memory.getSettings().dnd) return null;
 
+    if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
+
     if (idleSec >= 600 && now - this.lastIdleNudgeAt >= 30 * 60_000) {
       return `idle: 用户已经 ${Math.round(idleSec / 60)} 分钟没有操作`;
     }
 
-    if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
     const milestone = Math.floor(this.state.focusMin / 25);
     if (this.state.focusMin >= 25 && milestone > this.lastFocusMilestone && idleSec < 300) {
       return `focus-milestone: 连续专注 ${this.state.focusMin} 分钟`;
