@@ -26,6 +26,14 @@ function statusClass(status: AppStatus['apiStatus']): string {
   return 'pill pill-warn';
 }
 
+function sourceLabel(source: 'deepseek' | 'mock' | 'cache' | 'local' | null): string {
+  if (source === 'deepseek') return 'DeepSeek';
+  if (source === 'cache') return '缓存';
+  if (source === 'local') return '本地';
+  if (source === 'mock') return 'mock';
+  return '';
+}
+
 function meaningful(value?: string): string {
   const text = value?.trim() ?? '';
   return text && text !== 'unknown' ? text : '';
@@ -451,6 +459,7 @@ export default function PanelApp() {
   const activity = locked
     ? '你离开了一会儿。解锁后我会继续看着。'
     : meaningful(state?.activity) || '还没有扫描。点一下“扫描屏幕”，我看看你在做什么。';
+  const appInitial = locked ? '锁' : (rawApp || '同').trim().slice(0, 1).toUpperCase();
   const perceptionPaused = (status?.perceptionPausedUntil ?? 0) > Date.now();
   const analyzedAt = state?.lastAnalyzedAt ?? state?.lastScanAt;
   const stateStale = Boolean(analyzedAt && Date.now() - analyzedAt > 5 * 60_000);
@@ -523,36 +532,63 @@ export default function PanelApp() {
       <header className="panel-header">
         <div className="brand-lockup">
           <div className="brand-mark">同</div>
-          <div>
+          <div className="brand-copy">
             <div className="brand">
               同桌 <span>DESKMATE</span>
             </div>
-            <div className="subtitle">看见你的工作，偶尔说一句人话</div>
+            <div className="subtitle">你的桌面工作搭子</div>
           </div>
         </div>
         <div className="header-actions">
-          {status && <span className={statusClass(status.apiStatus)}>{statusLabel(status.apiStatus)}</span>}
-          <button className="icon-button" onClick={() => void openSettings()} title="设置">
+          {status && (
+            <span className={statusClass(status.apiStatus)} title={status.apiMessage}>
+              <i className="status-dot" />
+              {statusLabel(status.apiStatus)}
+            </span>
+          )}
+          <button
+            className="icon-button"
+            onClick={() => void openSettings()}
+            title="设置"
+            aria-label="设置"
+          >
             ⚙
           </button>
-          <button className="icon-button" onClick={() => void window.deskmate.closePanel()} title="收起">
+          <button
+            className="icon-button"
+            onClick={() => void window.deskmate.closePanel()}
+            title="收起"
+            aria-label="收起"
+          >
             ×
           </button>
         </div>
       </header>
 
       <main className="panel-main">
-        <section className="card context-card">
-          <div className="context-head">
-            <span className="eyebrow">当前状态</span>
+        <section className="card now-card">
+          <div className="now-head">
+            <span className="eyebrow">此刻</span>
             <div className="context-badges">
-              {source && <span className="source-tag">{source === 'deepseek' ? 'DeepSeek' : source === 'cache' ? '缓存' : source === 'local' ? '本地' : 'mock'}</span>}
-              <span className={`live-pill ${dndOn || locked || perceptionPaused || stateStale ? 'paused' : 'live'}`}>{liveLabel}</span>
+              {source && <span className="source-tag">{sourceLabel(source)}</span>}
+              <span
+                className={`live-pill ${dndOn || locked || perceptionPaused || stateStale ? 'paused' : 'live'}`}
+              >
+                {liveLabel}
+              </span>
             </div>
           </div>
-          <div className="context-app">{appName}</div>
-          <div className="context-window">{windowTitle}</div>
+
+          <div className="now-app">
+            <div className={`app-badge ${locked ? 'locked' : ''}`}>{appInitial}</div>
+            <div className="app-copy">
+              <div className="context-app">{appName}</div>
+              <div className="context-window">{windowTitle}</div>
+            </div>
+          </div>
+
           <p className="activity">{activity}</p>
+
           <div className="metrics">
             <div className="metric">
               <span>测试</span>
@@ -570,16 +606,22 @@ export default function PanelApp() {
               <strong className="metric-value">{formatClock(state?.lastScanAt)}</strong>
             </div>
           </div>
+
           <div className="context-insight" title={state?.evidence?.join('\n') || undefined}>
-            {captureLabel && <span>{captureLabel}</span>}
+            {captureLabel && <span className="capture-chip">{captureLabel}</span>}
             <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
             <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
             {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}
             {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
-            <span>扫描 {scanStats.total} · 分析 {scanStats.analyzed} · 缓存 {scanStats.cacheHits}</span>
-            <span>视觉 {status?.visionCallsThisHour ?? 0}/{status?.visionBudgetPerHour ?? 30}</span>
+            <span>
+              扫描 {scanStats.total} · 分析 {scanStats.analyzed} · 缓存 {scanStats.cacheHits}
+            </span>
+            <span>
+              视觉 {status?.visionCallsThisHour ?? 0}/{status?.visionBudgetPerHour ?? 30}
+            </span>
             {stateStale && <span className="stale-text">状态可能过期</span>}
           </div>
+
           <div className="context-foot">
             <span className="context-api" title={status?.apiMessage}>
               <i className={`api-dot ${apiDot}`} />
@@ -593,26 +635,28 @@ export default function PanelApp() {
           <div className="action-grid">
             <button className="action action-scan" disabled={busy} onClick={() => void scanScreen()}>
               <span className="action-icon">⌕</span>
-              <span>
+              <span className="action-copy">
                 <strong>扫描屏幕</strong>
-                <small>看看我现在在做什么</small>
+                <small>抓取聚焦显示器整屏</small>
               </span>
+              <span className="action-arrow">→</span>
             </button>
-            <button className="action" disabled={busy} onClick={() => void runDemo('pass')}>
+            <button className="action action-demo pass" disabled={busy} onClick={() => void runDemo('pass')}>
               <span className="action-icon">✓</span>
-              <span>
+              <span className="action-copy">
                 <strong>模拟通过</strong>
                 <small>红 → 绿</small>
               </span>
             </button>
-            <button className="action" disabled={busy} onClick={() => void runDemo('fail')}>
+            <button className="action action-demo fail" disabled={busy} onClick={() => void runDemo('fail')}>
               <span className="action-icon">!</span>
-              <span>
+              <span className="action-copy">
                 <strong>模拟失败</strong>
                 <small>测试提醒</small>
               </span>
             </button>
           </div>
+
           <div className="utility-row">
             <button className={`toggle ${dndOn ? 'on' : ''}`} onClick={() => void toggleDnd()}>
               <span className="toggle-dot" />
@@ -642,14 +686,18 @@ export default function PanelApp() {
 
         <section className="card chat-card">
           <div className="chat-head">
-            <div className="card-title">和同桌说两句</div>
-            {source && <span className="source-tag">{source === 'deepseek' ? 'DeepSeek' : source === 'cache' ? '缓存' : source === 'local' ? '本地' : 'mock'}</span>}
+            <div className="chat-title-block">
+              <div className="card-title">和同桌说两句</div>
+              <div className="chat-sub">{voiceOn ? '语音自动朗读已开启' : '语音已静音'}</div>
+            </div>
+            {source && <span className="source-tag">{sourceLabel(source)}</span>}
           </div>
+
           <div className="chat-scroll" ref={scrollRef}>
             {messages.map((message, index) => (
               <div
                 key={`${message.at}-${index}`}
-                className={message.role === 'user' ? 'message user' : 'message assistant'}
+                className={`message ${message.role === 'user' ? 'user' : 'assistant'}`}
               >
                 <div className="message-role">{message.role === 'user' ? '你' : '同桌'}</div>
                 <div className="message-text">{message.text}</div>
@@ -666,12 +714,14 @@ export default function PanelApp() {
               </div>
             )}
           </div>
+
           {messages.length < 4 && (
             <div className="prompt-chips">
               <button onClick={() => void sendText('我现在该干嘛？')}>我现在该干嘛？</button>
               <button onClick={() => void sendText('总结一下我屏幕上的内容')}>总结屏幕</button>
             </div>
           )}
+
           <div className="composer">
             <textarea
               ref={textareaRef}
@@ -693,6 +743,7 @@ export default function PanelApp() {
               disabled={busy || !input.trim()}
               onClick={() => void sendText(input)}
               title="发送"
+              aria-label="发送"
             >
               ↑
             </button>
@@ -702,7 +753,10 @@ export default function PanelApp() {
       </main>
 
       <footer className="panel-footer">
-        <span>Haru · Live2D</span>
+        <span className="footer-brand">
+          <i className="footer-dot" />
+          Haru · Live2D
+        </span>
         <span>{voiceOn ? '语音开启' : '语音静音'} · macOS</span>
       </footer>
 

@@ -95,10 +95,10 @@ npm run check:model
 
 ## 现在能做什么
 
-![面板预览](assets/panel-preview.png)
+![面板预览（模拟数据）](assets/panel-preview.png)
 
 - 透明、置顶、可拖动、点击穿透的 Haru 桌面形象；
-- 面板窗口：当前应用/窗口/活动、测试状态、屏幕权限、API 状态、聊天；
+- 面板窗口（默认 480×840）：当前应用/窗口/活动、测试状态、屏幕权限、API 状态、聊天；
 - **长期记忆**：SQLite + FTS5，保存在 `~/Library/Application Support/DeskMate/memory.db`；支持分类（项目/偏好/事实）、置顶、搜索、编辑、单条删除、手动添加；按问题检索相关记忆，并记录来源/置信度/使用次数；
 - **自动记忆**：可开关；稳定的偏好/项目会从聊天中自动沉淀，相似记忆自动合并；关闭后只有明确说“记住”才写入；
 - **工具调用**：`remember`、`search_memory`、`scan_screen`、`set_dnd`；
