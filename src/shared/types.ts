@@ -40,6 +40,8 @@ export interface DemoState {
   scanDurationMs?: number;
   unchangedCount?: number;
   ocrLines?: number;
+  captureKind?: 'display' | 'window';
+  displayName?: string;
   evidence?: string[];
 }
 

@@ -1,16 +1,26 @@
-import { desktopCapturer, powerMonitor, systemPreferences } from 'electron';
-import type { NativeImage } from 'electron';
+import { desktopCapturer, powerMonitor, screen, systemPreferences } from 'electron';
+import type { Display, NativeImage } from 'electron';
 import { activeWindow, openWindows } from 'get-windows';
 import type { ScreenStatus } from '../shared/types';
+
+export interface WindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface ActiveWindowInfo {
   app: string;
   title: string;
   id?: number;
   url?: string;
+  bounds?: WindowBounds;
 }
 
-export interface CapturedWindow {
+export type CaptureKind = 'display' | 'window';
+
+export interface CapturedFrame {
   base64: string;
   app: string;
   title: string;
@@ -18,6 +28,9 @@ export interface CapturedWindow {
   height: number;
   hash: string;
   capturedAt: number;
+  captureKind: CaptureKind;
+  displayId?: string;
+  displayName?: string;
 }
 
 export function getScreenStatus(): ScreenStatus {
@@ -75,6 +88,15 @@ export function getIdleSeconds(): number {
   }
 }
 
+export function rectsIntersect(a: WindowBounds, b: WindowBounds): boolean {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
+}
+
 function isSelfWindow(app: string, title: string): boolean {
   return app === 'DeskMate' || app === 'Electron' || title.includes('DeskMate');
 }
@@ -83,18 +105,37 @@ function toInfo(win: {
   title: string;
   id: number;
   owner: { name: string };
+  bounds: WindowBounds;
+  url?: string;
 }): ActiveWindowInfo {
   return {
     app: win.owner.name,
     title: win.title,
     id: win.id,
-    url: (win as unknown as { url?: string }).url,
+    url: win.url,
+    bounds: {
+      x: win.bounds.x,
+      y: win.bounds.y,
+      width: win.bounds.width,
+      height: win.bounds.height,
+    },
   };
 }
 
 function sourceWindowId(sourceId: string): string | null {
   const match = /^window:(\d+):/.exec(sourceId);
   return match?.[1] ?? null;
+}
+
+export async function readOpenWindows(): Promise<ActiveWindowInfo[]> {
+  try {
+    const windows = await openWindows();
+    return windows
+      .filter((candidate) => !isSelfWindow(candidate.owner.name, candidate.title))
+      .map(toInfo);
+  } catch {
+    return [];
+  }
 }
 
 export async function readActiveWindow(): Promise<ActiveWindowInfo | null> {
@@ -105,20 +146,95 @@ export async function readActiveWindow(): Promise<ActiveWindowInfo | null> {
     }
 
     // 面板打开时，前台窗口是 DeskMate 自己；退回到下一个真实窗口。
-    const windows = await openWindows();
-    for (const candidate of windows) {
-      if (!isSelfWindow(candidate.owner.name, candidate.title)) {
-        return toInfo(candidate);
-      }
-    }
-
-    return null;
+    return (await readOpenWindows())[0] ?? null;
   } catch {
     return null;
   }
 }
 
-export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedWindow | null> {
+export function displayForWindow(win: ActiveWindowInfo | null): Display {
+  if (win?.bounds) {
+    try {
+      return screen.getDisplayMatching(win.bounds);
+    } catch {
+      // fall through to the display under the cursor
+    }
+  }
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+export function displayLabel(display: Display): string {
+  const label = display.label?.trim();
+  return label || `显示器 ${display.id}`;
+}
+
+function encodeThumbnail(image: NativeImage, maxWidth: number): NativeImage {
+  const size = image.getSize();
+  if (size.width <= maxWidth) return image;
+  return image.resize({
+    width: maxWidth,
+    height: Math.round((size.height * maxWidth) / size.width),
+  });
+}
+
+async function captureDisplay(
+  display: Display,
+  active: ActiveWindowInfo | null,
+  maxWidth: number,
+): Promise<CapturedFrame | null> {
+  const aspect = display.size.width > 0 ? display.size.height / display.size.width : 0.75;
+  const thumbnailHeight = Math.max(1, Math.round(maxWidth * aspect));
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: maxWidth, height: thumbnailHeight },
+  });
+
+  const source =
+    sources.find((item) => item.display_id === String(display.id)) ??
+    (sources.length === 1 ? sources[0] : undefined);
+
+  if (!source || source.thumbnail.isEmpty()) return null;
+
+  const image = encodeThumbnail(source.thumbnail, maxWidth);
+  const resized = image.getSize();
+  const jpeg = image.toJPEG(72);
+  const name = displayLabel(display);
+
+  return {
+    base64: jpeg.toString('base64'),
+    app: active?.app ?? 'Desktop',
+    title: active?.title ?? name,
+    width: resized.width,
+    height: resized.height,
+    hash: perceptualHash(image),
+    capturedAt: Date.now(),
+    captureKind: 'display',
+    displayId: String(display.id),
+    displayName: name,
+  };
+}
+
+/**
+ * 抓当前前台窗口所在显示器的整屏。找不到对应显示器 source 时返回 null，
+ * 调用方可以退回到 captureActiveWindow()。
+ */
+export async function captureFocusedDisplay(
+  active: ActiveWindowInfo | null,
+  maxWidth = 1280,
+): Promise<CapturedFrame | null> {
+  if (getScreenStatus() === 'denied' || getScreenStatus() === 'restricted') {
+    return null;
+  }
+
+  const display = displayForWindow(active);
+  try {
+    return await captureDisplay(display, active, maxWidth);
+  } catch {
+    return null;
+  }
+}
+
+export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedFrame | null> {
   if (getScreenStatus() === 'denied' || getScreenStatus() === 'restricted') {
     return null;
   }
@@ -144,15 +260,7 @@ export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedWind
 
     if (!source || source.thumbnail.isEmpty()) return null;
 
-    const size = source.thumbnail.getSize();
-    const image =
-      size.width > maxWidth
-        ? source.thumbnail.resize({
-            width: maxWidth,
-            height: Math.round((size.height * maxWidth) / size.width),
-          })
-        : source.thumbnail;
-
+    const image = encodeThumbnail(source.thumbnail, maxWidth);
     const resized = image.getSize();
     const jpeg = image.toJPEG(72);
 
@@ -164,6 +272,7 @@ export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedWind
       height: resized.height,
       hash: perceptualHash(image),
       capturedAt: Date.now(),
+      captureKind: 'window',
     };
   } catch {
     return null;

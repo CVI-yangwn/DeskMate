@@ -503,6 +503,12 @@ export default function PanelApp() {
   const confidence = state?.confidence ?? 0;
   const scanDuration = state?.scanDurationMs ?? 0;
   const evidenceCount = state?.evidence?.length ?? 0;
+  const captureLabel =
+    state?.captureKind === 'display'
+      ? `整屏${state.displayName ? ` · ${state.displayName}` : ''}`
+      : state?.captureKind === 'window'
+        ? '前台窗口'
+        : '';
   const scanStats = status?.scanStats ?? { total: 0, analyzed: 0, cacheHits: 0 };
   const memoryFilters = [
     { key: 'all' as const, label: '全部', count: filterCounts.all },
@@ -565,6 +571,7 @@ export default function PanelApp() {
             </div>
           </div>
           <div className="context-insight" title={state?.evidence?.join('\n') || undefined}>
+            {captureLabel && <span>{captureLabel}</span>}
             <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
             <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
             {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}

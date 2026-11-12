@@ -24,10 +24,14 @@ import { MockBrain } from './mockBrain';
 import { runOcr } from './ocr';
 import {
   captureActiveWindow,
+  captureFocusedDisplay,
+  displayForWindow,
   getIdleSeconds,
   getScreenStatus,
   hashDistance,
   readActiveWindow,
+  readOpenWindows,
+  rectsIntersect,
 } from './perception';
 import { speakWithSay } from './tts';
 
@@ -403,6 +407,8 @@ export class BrainService {
         evidence: ['隐私排除规则命中'],
         unchangedCount: this.unchangedCount,
         focusMin: this.nextFocusMin(idleSec, Date.now(), active.app),
+        captureKind: undefined,
+        displayName: undefined,
       };
       this.emit();
       return {
@@ -417,7 +423,19 @@ export class BrainService {
       };
     }
 
-    const captured = await captureActiveWindow(1280);
+    const display = displayForWindow(active);
+    const visibleWindows = await readOpenWindows();
+    // 整屏截图可能把同屏的隐私应用也拍进去；只要发现，就退回到前台窗口截图。
+    const privacyFallback = visibleWindows.some((win) => {
+      if (!win.bounds || win.app === active?.app) return false;
+      return rectsIntersect(win.bounds, display.bounds) && this.isAppExcluded(win.app);
+    });
+
+    let captured = privacyFallback
+      ? await captureActiveWindow(1280)
+      : await captureFocusedDisplay(active, 1280);
+    if (!captured && active) captured = await captureActiveWindow(1280);
+    if (captured && this.isAppExcluded(captured.app)) captured = null;
 
     if (!captured) {
       this.state = {
@@ -556,6 +574,14 @@ export class BrainService {
       if (preview) evidence.push(`OCR: ${preview}`);
     }
 
+    evidence.push(
+      captured.captureKind === 'display'
+        ? `截图范围：整屏${captured.displayName ? `（${captured.displayName}）` : ''}`
+        : privacyFallback
+          ? '截图范围：同屏有隐私应用，退回前台窗口'
+          : '截图范围：前台窗口',
+    );
+
     const previousTest = this.state.testResult;
     const nextTest =
       inspection.testStatus === 'none' ? this.state.testResult : inspection.testStatus;
@@ -584,6 +610,8 @@ export class BrainService {
       unchangedCount: 0,
       ocrLines: ocr?.lines.length ?? 0,
       lastUpdated: analyzedAt,
+      captureKind: captured.captureKind,
+      displayName: captured.displayName,
       evidence: evidence.slice(0, 8),
       focusMin: this.nextFocusMin(idleSec, analyzedAt, inspection.app || captured.app),
     };
