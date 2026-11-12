@@ -41,8 +41,11 @@ const scoreSchema = z.preprocess(clamp01, z.number().min(0).max(1));
 const testStatusSchema = z.preprocess((value) => {
   if (typeof value !== 'string') return value;
   const normalized = value.toLowerCase();
+  if (/\bnot\s+(pass|passed)\b/.test(normalized)) return 'unknown';
+  const failedCount = normalized.match(/(\d+)\s+(failed|failure|failures)\b/);
+  if (failedCount && Number(failedCount[1]) > 0) return 'fail';
   if (/(pass|通过|成功|绿)/.test(normalized)) return 'pass';
-  if (/(fail|失败|错误|报错|红|error)/.test(normalized)) return 'fail';
+  if (/(fail|failed|failure|error|失败|错误|报错|红)/.test(normalized)) return 'fail';
   return 'unknown';
 }, z.enum(['pass', 'fail', 'unknown']).default('unknown'));
 
@@ -77,7 +80,7 @@ const memoryExtractionSchema = z.object({
 });
 
 const planSchema = z.object({
-  say: z.boolean(),
+  say: z.boolean().default(false),
   displayText: z.string().max(180).default(''),
   speechText: z.string().max(180).default(''),
   emotion: z.enum(EMOTIONS).default('neutral'),
@@ -510,10 +513,16 @@ function normalizePlan(
     };
   }
 
+  const subject =
+    state.windowTitle && state.windowTitle !== 'unknown'
+      ? state.windowTitle
+      : state.app && state.app !== 'unknown'
+        ? state.app
+        : '当前窗口';
   const fallback =
     state.testResult === 'pass'
-      ? `${state.file} 绿了！这次追得挺久。`
-      : `${state.file} 还是红的。要不要先看最近一次报错？`;
+      ? `${subject} 绿了！这次追得挺久。`
+      : `${subject} 还是红的。要不要先看最近一次报错？`;
 
   const displayText = (plan.displayText.trim() || fallback).slice(0, 90);
   const speechText = (plan.speechText.trim() || displayText)

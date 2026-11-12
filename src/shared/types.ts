@@ -26,9 +26,6 @@ export type Emotion =
   | 'comfort';
 
 export interface DemoState {
-  project: string;
-  file: string;
-  testCommand: string;
   testResult: TestResult;
   focusMin: number;
   idleSec: number;

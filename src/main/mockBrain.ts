@@ -1,5 +1,18 @@
 import type { ChatReply, DemoState, Inspection, UtterancePlan } from '../shared/types';
 
+function subjectOf(state: DemoState): string {
+  const title = state.windowTitle?.trim();
+  if (title && title !== 'unknown') return title;
+  const app = state.app?.trim();
+  if (app && app !== 'unknown') return app;
+  return '当前窗口';
+}
+
+function appOf(state: DemoState): string {
+  const app = state.app?.trim();
+  return app && app !== 'unknown' ? app : '当前应用';
+}
+
 export class MockBrain {
   inspectScreenshot(app: string, title: string): Inspection {
     return {
@@ -18,8 +31,8 @@ export class MockBrain {
     if (event.includes('test-pass')) {
       return {
         say: true,
-        displayText: `绿了！${state.file} 终于过了。`,
-        speechText: `绿了！${state.file} 终于过了。`,
+        displayText: `绿了！${subjectOf(state)} 终于过了。`,
+        speechText: `绿了！${subjectOf(state)} 终于过了。`,
         emotion: 'celebrate',
         motion: 'celebrate',
         urgency: 'low',
@@ -31,8 +44,8 @@ export class MockBrain {
     if (event.includes('test-fail')) {
       return {
         say: true,
-        displayText: `又红了。还是 ${state.file}，要不要先看最近一次报错？`,
-        speechText: `又红了。还是 ${state.file}，要不要先看最近一次报错？`,
+        displayText: `又红了。还是 ${subjectOf(state)}，要不要先看最近一次报错？`,
+        speechText: `又红了。还是 ${subjectOf(state)}，要不要先看最近一次报错？`,
         emotion: 'comfort',
         motion: 'comfort',
         urgency: 'low',
@@ -58,14 +71,14 @@ export class MockBrain {
 
     if (lower.includes('测试') || lower.includes('test') || lower.includes('红')) {
       return {
-        text: `现在 ${state.file} 是${state.testResult === 'pass' ? '绿的' : '红的'}。最近一次是 \`${state.testCommand}\`，你已经专注 ${state.focusMin} 分钟了。`,
+        text: `现在 ${subjectOf(state)} 是${state.testResult === 'pass' ? '绿的' : '红的'}。测试${state.testResult === 'pass' ? '通过了' : '还没通过'}，你已经专注 ${state.focusMin} 分钟了。`,
         source: 'mock',
       };
     }
 
     if (lower.includes('状态') || lower.includes('干嘛') || lower.includes('在做什么')) {
       return {
-        text: `你在 ${state.project} 的 ${state.file}，测试${
+        text: `你在 ${appOf(state)} 的 ${subjectOf(state)}，测试${
           state.testResult === 'pass' ? '刚过' : '还红着'
         }，已经专注 ${state.focusMin} 分钟。`,
         source: 'mock',
@@ -80,7 +93,7 @@ export class MockBrain {
     }
 
     return {
-      text: `我看到了：${state.project} / ${state.file}，测试${
+      text: `我看到了：${subjectOf(state)}，测试${
         state.testResult === 'pass' ? '是绿的' : '还是红的'
       }。你想让我帮你看报错，还是先自己捋一下？`,
       source: 'mock',
