@@ -77,7 +77,13 @@ export default function AvatarApp() {
         onHitRect={onHitRect}
         onOpenPanel={onOpenPanel}
       />
-      <Bubble ref={bubbleRef} text={plan?.displayText ?? ''} visible={bubbleVisible} onClose={closeBubble} />
+      <Bubble
+        ref={bubbleRef}
+        text={plan?.displayText ?? ''}
+        visible={bubbleVisible}
+        onClose={closeBubble}
+        onOpen={onOpenPanel}
+      />
     </div>
   );
 }

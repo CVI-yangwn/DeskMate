@@ -109,6 +109,11 @@ export default function PanelApp() {
   }, []);
 
   useEffect(() => {
+    if (!memoryOpen) return;
+    void window.deskmate.getMemoryFacts().then(setFacts).catch(console.error);
+  }, [memoryOpen, status?.memoryCount]);
+
+  useEffect(() => {
     if (!status) return;
     setMessages((prev) => {
       if (prev.length > 0) return prev;
