@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 某些 Electron 宿主（例如 Harness）会设置 ELECTRON_RUN_AS_NODE，
+# 这会让 Electron 以 Node 模式启动而不是应用模式。
+unset ELECTRON_RUN_AS_NODE
+
 if ! command -v node >/dev/null 2>&1; then
   shopt -s nullglob
   for candidate in "$ROOT"/.node/node-*/bin; do
