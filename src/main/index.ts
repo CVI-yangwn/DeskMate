@@ -298,6 +298,7 @@ function registerIpc(): void {
     if (win) {
       const [x, y] = win.getPosition();
       brain.saveAvatarPosition({ x, y });
+      setAvatarPosition({ x, y });
     }
   });
 }

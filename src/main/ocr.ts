@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,7 +38,7 @@ export async function runOcr(imageBase64: string): Promise<OcrResult | null> {
   const binary = binaryPath();
   if (!binary) return null;
 
-  const file = path.join(os.tmpdir(), `deskmate-ocr-${process.pid}-${Date.now()}.jpg`);
+  const file = path.join(os.tmpdir(), `deskmate-ocr-${process.pid}-${randomUUID()}.jpg`);
   try {
     fs.writeFileSync(file, Buffer.from(imageBase64, 'base64'), { mode: 0o600 });
     const { stdout } = await execFileAsync(binary, [file], {

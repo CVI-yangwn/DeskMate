@@ -1,4 +1,42 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+
+interface SayProcess {
+  child: ChildProcess;
+  cancelled: boolean;
+}
+
+let current: SayProcess | null = null;
+
+function cancelCurrent(): void {
+  if (!current) return;
+  current.cancelled = true;
+  try {
+    current.child.kill();
+  } catch {
+    // the process may already have exited
+  }
+  current = null;
+}
+
+function runSay(args: string[], fallbackArgs?: string[]): void {
+  cancelCurrent();
+
+  const handle: SayProcess = {
+    child: spawn('say', args, { stdio: 'ignore' }),
+    cancelled: false,
+  };
+  current = handle;
+
+  handle.child.on('error', () => {
+    if (current === handle) current = null;
+  });
+  handle.child.on('exit', (code) => {
+    if (current === handle) current = null;
+    if (!handle.cancelled && code !== 0 && fallbackArgs) {
+      runSay(fallbackArgs);
+    }
+  });
+}
 
 /**
  * macOS 自带 say。没有音频流，所以这里只负责发声；
@@ -14,20 +52,7 @@ export function speakWithSay(text: string): number {
     return estimate;
   }
 
-  const speak = (voice?: string) => {
-    const args = voice ? ['-v', voice, '-r', '180', clean] : ['-r', '180', clean];
-    const child = spawn('say', args, { stdio: 'ignore' });
-    child.on('error', () => {
-      // say 不可用时静默降级到气泡
-    });
-    child.on('exit', (code) => {
-      if (code !== 0 && voice) {
-        const fallback = spawn('say', ['-r', '180', clean], { stdio: 'ignore' });
-        fallback.on('error', () => undefined);
-      }
-    });
-  };
-
-  speak('Tingting');
+  // 新的语音会打断上一条，避免聊天和主动提醒同时说话。
+  runSay(['-v', 'Tingting', '-r', '180', clean], ['-r', '180', clean]);
   return estimate;
 }
