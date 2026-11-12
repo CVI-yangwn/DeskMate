@@ -6,9 +6,9 @@
   "description": "A macOS desktop companion for programmers: Live2D + DeepSeek + native speech.",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview",
+    "preview": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test scripts/test-*.mjs",
     "check:model": "node scripts/check-live2d-model.mjs assets/live2d/haru/Haru.model3.json",
