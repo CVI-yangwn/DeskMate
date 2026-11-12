@@ -38,7 +38,6 @@ export interface DemoState {
   lastAnalyzedAt?: number;
   confidence?: number;
   scanDurationMs?: number;
-  unchangedCount?: number;
   ocrLines?: number;
   captureKind?: 'display' | 'window';
   displayName?: string;
@@ -59,7 +58,6 @@ export interface UtterancePlan {
 export interface ScanStats {
   total: number;
   analyzed: number;
-  cacheHits: number;
 }
 
 export interface AppStatus {
@@ -77,7 +75,6 @@ export interface AppStatus {
   autoMemory: boolean;
   perceptionPausedUntil?: number;
   excludedApps: string[];
-  visionBudgetPerHour: number;
   visionCallsThisHour: number;
   scanStats: ScanStats;
   state: DemoState;
@@ -105,9 +102,7 @@ export interface AgentSettings {
   autoMemory: boolean;
   perceptionPausedUntil?: number;
   excludedApps: string[];
-  visionBudgetPerHour: number;
   scanIntervalMs: number;
-  proactiveCooldownMs: number;
   avatarPosition?: { x: number; y: number };
 }
 
@@ -191,7 +186,7 @@ export interface DeskMateApi {
   setVoice(enabled: boolean): Promise<AppStatus>;
   pausePerception(minutes: number): Promise<AppStatus>;
   resumePerception(): Promise<AppStatus>;
-  setPrivacySettings(excludedApps: string[], visionBudgetPerHour: number): Promise<AppStatus>;
+  setPrivacySettings(excludedApps: string[]): Promise<AppStatus>;
   openPanel(): Promise<void>;
   closePanel(): Promise<void>;
   setHitRect(rect: HitRect): Promise<void>;

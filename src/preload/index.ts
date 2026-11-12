@@ -60,8 +60,8 @@ const api: DeskMateApi = {
   resumePerception: () =>
     ipcRenderer.invoke('perception:resume') as Promise<AppStatus>,
 
-  setPrivacySettings: (excludedApps: string[], visionBudgetPerHour: number) =>
-    ipcRenderer.invoke('settings:set-privacy', excludedApps, visionBudgetPerHour) as Promise<AppStatus>,
+  setPrivacySettings: (excludedApps: string[]) =>
+    ipcRenderer.invoke('settings:set-privacy', excludedApps) as Promise<AppStatus>,
 
   openPanel: () => ipcRenderer.invoke('panel:open') as Promise<void>,
 

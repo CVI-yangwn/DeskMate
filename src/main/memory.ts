@@ -15,9 +15,7 @@ const DEFAULT_SETTINGS: AgentSettings = {
   voiceEnabled: true,
   autoMemory: true,
   excludedApps: ['1Password', 'Keychain Access', 'Passwords', 'System Settings', 'System Preferences'],
-  visionBudgetPerHour: 30,
   scanIntervalMs: 60_000,
-  proactiveCooldownMs: 300_000,
 };
 
 const MAX_FACTS = 100;
@@ -59,13 +57,8 @@ function clampSettings(value: unknown): AgentSettings {
     voiceEnabled: raw.voiceEnabled !== false,
     autoMemory: raw.autoMemory !== false,
     excludedApps,
-    visionBudgetPerHour: Math.min(120, Math.max(1, Number(raw.visionBudgetPerHour) || DEFAULT_SETTINGS.visionBudgetPerHour)),
     ...(perceptionPausedUntil ? { perceptionPausedUntil } : {}),
     scanIntervalMs: Math.max(20_000, Number(raw.scanIntervalMs) || DEFAULT_SETTINGS.scanIntervalMs),
-    proactiveCooldownMs: Math.max(
-      60_000,
-      Number(raw.proactiveCooldownMs) || DEFAULT_SETTINGS.proactiveCooldownMs,
-    ),
     ...(avatarPosition ? { avatarPosition } : {}),
   };
 }

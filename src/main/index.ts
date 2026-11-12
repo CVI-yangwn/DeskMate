@@ -25,7 +25,6 @@ import {
   createAvatarWindow,
   createPanelWindow,
   getAvatarWindow,
-  getPanelWindow,
   hidePanel,
   positionAvatarWindow,
   sendToAll,
@@ -257,12 +256,8 @@ function startPerceptionLoop(): void {
   );
 
   const nextDelay = (result: Awaited<ReturnType<typeof scanAndBroadcast>>): number => {
-    if (!result.changed) {
-      if (result.source === 'mock') return 30_000;
-      return Math.min(180_000, baseInterval * 2);
-    }
+    if (!result.changed) return 30_000;
     if (result.state.idleSec > 300) return 180_000;
-    if (!getPanelWindow()?.isVisible()) return Math.min(180_000, baseInterval * 2);
     return baseInterval;
   };
 
@@ -363,8 +358,8 @@ function registerIpc(): void {
   ipcMain.handle('settings:set-voice', (_event, enabled: boolean) => brain.setVoice(Boolean(enabled)));
   ipcMain.handle('perception:pause', (_event, minutes: number) => brain.pausePerception(Number(minutes) || 15));
   ipcMain.handle('perception:resume', () => brain.resumePerception());
-  ipcMain.handle('settings:set-privacy', (_event, apps: string[], budget: number) =>
-    brain.setPrivacySettings(Array.isArray(apps) ? apps : [], Number(budget) || 30),
+  ipcMain.handle('settings:set-privacy', (_event, apps: string[]) =>
+    brain.setPrivacySettings(Array.isArray(apps) ? apps : []),
   );
 
   ipcMain.handle('panel:open', () => {

@@ -28,14 +28,13 @@ import {
   displayForWindow,
   getIdleSeconds,
   getScreenStatus,
-  hashDistance,
   readActiveWindow,
   readOpenWindows,
   rectsIntersect,
 } from './perception';
 import { speakWithSay } from './tts';
 
-const AMBIENT_INTERVAL_MS = 8 * 60_000;
+const SPEECH_COOLDOWN_MS = 2 * 60_000;
 
 const INITIAL_STATE: DemoState = {
   testResult: 'none',
@@ -70,25 +69,6 @@ function detectOcrTest(text?: string): TestResult {
   return 'none';
 }
 
-function textSimilarity(a: string, b: string): number {
-  const normalize = (text: string) => text.toLowerCase().replace(/\s+/g, '');
-  const left = normalize(a);
-  const right = normalize(b);
-  if (!left || !right) return 0;
-  if (left === right) return 1;
-  const grams = (text: string) => {
-    const set = new Set<string>();
-    for (let index = 0; index < text.length - 1; index += 1) set.add(text.slice(index, index + 2));
-    return set;
-  };
-  const aSet = grams(left);
-  const bSet = grams(right);
-  if (aSet.size === 0 || bSet.size === 0) return 0;
-  let overlap = 0;
-  for (const gram of aSet) if (bSet.has(gram)) overlap += 1;
-  return overlap / new Set([...aSet, ...bSet]).size;
-}
-
 export class BrainService {
   private readonly client = new DeepSeekClient(getDeepSeekEnv());
   private readonly mock = new MockBrain();
@@ -98,20 +78,14 @@ export class BrainService {
   private apiStatus: ApiStatus;
   private apiMessage: string;
   private lastScanStartedAt = 0;
-  private lastProactiveAt = 0;
+  private lastSpokenAt = Date.now();
+  private lastSpokenText = '';
   private lastFocusMilestone = 0;
   private lastIdleNudgeAt = 0;
-  private lastAmbientAt = Date.now();
   private lastIdleSec = 0;
   private lastUserAskedToRemember = false;
-  private lastScreenHash = '';
-  private lastScreenApp = '';
-  private lastScreenTitle = '';
   private lastAnalyzedAt = 0;
-  private unchangedCount = 0;
-  private lastOcrText = '';
-  private lastOcrCritical = new Set<string>();
-  private scanStats = { total: 0, analyzed: 0, cacheHits: 0 };
+  private scanStats = { total: 0, analyzed: 0 };
   private scanInFlight: Promise<ScanResult> | null = null;
   private visionHourStartedAt = Date.now();
   private visionCallsThisHour = 0;
@@ -145,7 +119,6 @@ export class BrainService {
       autoMemory: this.memory.getSettings().autoMemory,
       perceptionPausedUntil: this.memory.getSettings().perceptionPausedUntil,
       excludedApps: this.memory.getSettings().excludedApps,
-      visionBudgetPerHour: this.memory.getSettings().visionBudgetPerHour,
       visionCallsThisHour: this.visionCallsThisHour,
       scanStats: { ...this.scanStats },
       state: { ...this.state },
@@ -199,10 +172,9 @@ export class BrainService {
     return this.getStatus();
   }
 
-  setPrivacySettings(excludedApps: string[], visionBudgetPerHour: number): AppStatus {
+  setPrivacySettings(excludedApps: string[]): AppStatus {
     this.memory.updateSettings({
       excludedApps: Array.isArray(excludedApps) ? excludedApps : [],
-      visionBudgetPerHour,
     });
     this.emit();
     return this.getStatus();
@@ -222,11 +194,12 @@ export class BrainService {
     });
   }
 
-  private resetVisionWindow(): void {
+  private noteVisionCall(): void {
     if (Date.now() - this.visionHourStartedAt >= 60 * 60_000) {
       this.visionHourStartedAt = Date.now();
       this.visionCallsThisHour = 0;
     }
+    this.visionCallsThisHour += 1;
   }
 
   isPerceptionPaused(): boolean {
@@ -242,9 +215,11 @@ export class BrainService {
 
   clearMemory(): AppStatus {
     this.memory.clear();
-    this.lastProactiveAt = 0;
+    this.lastSpokenAt = 0;
+    this.lastSpokenText = '';
     this.lastFocusMilestone = 0;
     this.lastIdleNudgeAt = 0;
+    this.lastIdleSec = 0;
     this.emit();
     return this.getStatus();
   }
@@ -328,35 +303,6 @@ export class BrainService {
     return this.getStatus();
   }
 
-  private ocrSimilarity(text: string): number {
-    if (!text || !this.lastOcrText) return 0;
-    return textSimilarity(text, this.lastOcrText);
-  }
-
-  private ocrCriticalChanged(text: string): boolean {
-    const critical = /\b(pass|passed|fail|failed|error|errors)\b|通过|失败|报错|错误/i;
-    const current = new Set(
-      text
-        .split('\n')
-        .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
-        .filter((line) => line && critical.test(line)),
-    );
-    if (current.size !== this.lastOcrCritical.size) return true;
-    for (const line of current) if (!this.lastOcrCritical.has(line)) return true;
-    return false;
-  }
-
-  private rememberOcr(text: string): void {
-    this.lastOcrText = text;
-    const critical = /\b(pass|passed|fail|failed|error|errors)\b|通过|失败|报错|错误/i;
-    this.lastOcrCritical = new Set(
-      text
-        .split('\n')
-        .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
-        .filter((line) => line && critical.test(line)),
-    );
-  }
-
   async scanScreen(allowProactive = true): Promise<ScanResult> {
     if (this.scanInFlight) return this.scanInFlight;
 
@@ -399,7 +345,6 @@ export class BrainService {
     const idleSec = getIdleSeconds();
 
     if (active && this.isAppExcluded(active.app)) {
-      this.unchangedCount += 1;
       this.state = {
         ...this.state,
         app: active.app,
@@ -409,7 +354,6 @@ export class BrainService {
         lastCheckedAt: Date.now(),
         confidence: 1,
         evidence: ['隐私排除规则命中'],
-        unchangedCount: this.unchangedCount,
         focusMin: this.nextFocusMin(idleSec, Date.now(), active.app),
         captureKind: undefined,
         displayName: undefined,
@@ -423,7 +367,7 @@ export class BrainService {
         message: `已跳过隐私应用：${active.app}`,
         changed: false,
         durationMs: Date.now() - started,
-        source: 'cache',
+        source: 'mock',
       };
     }
 
@@ -470,71 +414,14 @@ export class BrainService {
       };
     }
 
-    const sameWindow =
-      captured.app === this.lastScreenApp && captured.title === this.lastScreenTitle;
-    const distance = hashDistance(captured.hash, this.lastScreenHash);
     const ocr = await runOcr(captured.base64);
-    const ocrSimilarity = sameWindow ? this.ocrSimilarity(ocr?.text ?? '') : 0;
-    const criticalOcrChanged = sameWindow ? this.ocrCriticalChanged(ocr?.text ?? '') : true;
-    const hashUnchanged = Boolean(this.lastScreenHash) && sameWindow && distance <= 8;
-    const unchanged = hashUnchanged || (sameWindow && ocrSimilarity >= 0.8 && !criticalOcrChanged);
-    const stale = Date.now() - this.lastAnalyzedAt;
-    if (unchanged && stale < 10 * 60_000) {
-      this.unchangedCount += 1;
-      this.scanStats.cacheHits += 1;
-      this.state = {
-        ...this.state,
-        idleSec,
-        lastScanAt: Date.now(),
-        lastCheckedAt: Date.now(),
-        unchangedCount: this.unchangedCount,
-        focusMin: this.nextFocusMin(idleSec, Date.now(), active?.app ?? this.state.app),
-      };
-      this.emit();
-
-      return {
-        state: { ...this.state },
-        inspection: null,
-        plan: null,
-        screenStatus,
-        message: '屏幕没有明显变化，沿用上次分析。',
-        changed: false,
-        durationMs: Date.now() - started,
-        source: 'cache',
-      };
-    }
-
     const ocrTest = detectOcrTest(ocr?.text);
-    this.resetVisionWindow();
-    const visionBudget = this.memory.getSettings().visionBudgetPerHour;
-    const budgetBlocked = this.shouldTryApi() && this.visionCallsThisHour >= visionBudget;
 
     let inspection: Inspection;
-    let source: 'deepseek' | 'mock' | 'local' = 'mock';
+    let source: 'deepseek' | 'mock' = 'mock';
 
-    if (budgetBlocked) {
-      const localPreview = (ocr?.lines ?? [])
-        .filter((line) => line.confidence >= 0.5)
-        .slice(0, 3)
-        .map((line) => line.text)
-        .join(' | ')
-        .slice(0, 180);
-      inspection = {
-        app: captured.app,
-        title: captured.title,
-        activity:
-          this.state.activity && this.state.activity !== INITIAL_STATE.activity
-            ? this.state.activity
-            : `视觉预算已用完，仅本地 OCR 读取了 ${ocr?.lines.length ?? 0} 行。`,
-        testStatus: ocrTest,
-        progress: 0,
-        struggle: 0,
-        evidence: localPreview ? [`OCR: ${localPreview}`, '视觉预算已用完'] : ['视觉预算已用完'],
-        confidence: ocr?.lines.length ? 0.45 : 0,
-      };
-      source = 'local';
-    } else if (this.shouldTryApi()) {
-      this.visionCallsThisHour += 1;
+    if (this.shouldTryApi()) {
+      this.noteVisionCall();
       try {
         inspection = await this.client.inspectScreenshot(
           captured.base64,
@@ -591,13 +478,8 @@ export class BrainService {
       inspection.testStatus === 'none' ? this.state.testResult : inspection.testStatus;
     const analyzedAt = Date.now();
 
-    this.lastScreenHash = captured.hash;
-    this.lastScreenApp = captured.app;
-    this.lastScreenTitle = captured.title;
     this.lastAnalyzedAt = analyzedAt;
-    this.unchangedCount = 0;
     this.scanStats.analyzed += 1;
-    this.rememberOcr(ocr?.text ?? '');
 
     this.state = {
       ...this.state,
@@ -611,7 +493,6 @@ export class BrainService {
       lastAnalyzedAt: analyzedAt,
       confidence: inspection.confidence,
       scanDurationMs: analyzedAt - started,
-      unchangedCount: 0,
       ocrLines: ocr?.lines.length ?? 0,
       lastUpdated: analyzedAt,
       captureKind: captured.captureKind,
@@ -622,38 +503,38 @@ export class BrainService {
 
     let planPayload: UtterancePayload | null = null;
     let event: string | null = null;
-    let critical = false;
+    const dnd = this.memory.getSettings().dnd;
 
-    if (previousTest === 'fail' && nextTest === 'pass') {
+    if (!dnd && previousTest === 'fail' && nextTest === 'pass') {
       event = `test-pass: 截图显示测试从失败变为通过（${this.state.activity}）`;
-      critical = true;
-    } else if (allowProactive) {
-      event = this.pickProactiveEvent(idleSec, now);
+    } else if (allowProactive && !dnd) {
+      event = this.buildObservationEvent(idleSec, now);
     }
 
-    if (event && this.canProactive(critical)) {
-      console.info(`[proactive] ${event.split(':')[0]}`);
-      if (event.startsWith('idle:')) {
-        this.lastIdleNudgeAt = now;
-      } else if (event.startsWith('focus-milestone:')) {
-        this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
-      } else if (event.startsWith('ambient:')) {
-        this.lastAmbientAt = now;
-      }
-
+    if (event) {
+      // 每次扫描都把“此刻要不要说话”交给 LLM，不再用长冷却/大事门槛限制。
       const generated = await this.generatePlan(event);
       const plan = this.ensureAudible(event, generated.plan);
-      const speakingMs =
-        this.isVoiceEnabled() && plan.say ? speakWithSay(plan.speechText) : 0;
-      planPayload = {
-        plan,
-        state: { ...this.state },
-        speakingMs,
-        source: generated.source,
-        origin: 'proactive',
-      };
-      this.lastProactiveAt = Date.now();
-      if (plan.say) {
+      const canSpeak = Date.now() - this.lastSpokenAt >= SPEECH_COOLDOWN_MS;
+      console.info(
+        `[proactive] ${event.split(':')[0]} ${plan.say ? (canSpeak ? 'speak' : 'cooldown') : 'silent'}`,
+      );
+
+      if (plan.say && canSpeak) {
+        const speakingMs = this.isVoiceEnabled() ? speakWithSay(plan.speechText) : 0;
+        planPayload = {
+          plan,
+          state: { ...this.state },
+          speakingMs,
+          source: generated.source,
+          origin: 'proactive',
+        };
+        this.lastSpokenAt = Date.now();
+        this.lastSpokenText = plan.displayText;
+        if (event.startsWith('idle:')) this.lastIdleNudgeAt = now;
+        else if (event.startsWith('focus-milestone:')) {
+          this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+        }
         this.memory.appendMessage('assistant', plan.displayText);
       }
     }
@@ -669,59 +550,52 @@ export class BrainService {
         ? '已主动关注当前状态。'
         : source === 'mock'
           ? '已截图，但视觉模型不可用，已用本地 OCR 兜底。'
-          : source === 'local'
-            ? `视觉预算已用完（${this.visionCallsThisHour}/${visionBudget}），仅本地 OCR。`
-            : ocr?.lines.length
-              ? `已扫描（视觉 + 本地 OCR ${ocr.lines.length} 行）。`
-              : '已扫描。',
+          : ocr?.lines.length
+            ? `已扫描（视觉 + 本地 OCR ${ocr.lines.length} 行）。`
+            : '已扫描。',
       changed: true,
       durationMs: analyzedAt - started,
       source,
     };
   }
 
-  private pickProactiveEvent(idleSec: number, now: number): string | null {
+  private buildObservationEvent(idleSec: number, now: number): string | null {
     const wasIdle = this.lastIdleSec;
     this.lastIdleSec = idleSec;
-    if (this.memory.getSettings().dnd) return null;
 
     // 离开 10 分钟以上再回来，先打个招呼。
     if (wasIdle >= 600 && idleSec < 60) {
       return `return: 用户离开 ${Math.round(wasIdle / 60)} 分钟后回来了`;
     }
 
-    if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
-
-    if (idleSec >= 600 && now - this.lastIdleNudgeAt >= 30 * 60_000) {
-      return `idle: 用户已经 ${Math.round(idleSec / 60)} 分钟没有操作`;
+    if (idleSec >= 600) {
+      if (now - this.lastIdleNudgeAt >= 30 * 60_000) {
+        return `idle: 用户已经 ${Math.round(idleSec / 60)} 分钟没有操作`;
+      }
+      return null;
     }
+
+    if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
 
     const milestone = Math.floor(this.state.focusMin / 25);
     if (this.state.focusMin >= 25 && milestone > this.lastFocusMilestone && idleSec < 300) {
       return `focus-milestone: 连续专注 ${this.state.focusMin} 分钟`;
     }
 
-    // 没有大事发生时，也要偶尔说一句，让搭子有存在感。
-    if (
-      this.state.focusMin >= 2 &&
-      this.state.activity &&
-      this.state.activity !== INITIAL_STATE.activity &&
-      now - this.lastAmbientAt >= AMBIENT_INTERVAL_MS
-    ) {
-      return `ambient: 用户正在「${this.state.activity.slice(0, 80)}」`;
-    }
+    const activity = this.state.activity?.trim();
+    if (!activity || activity === INITIAL_STATE.activity) return null;
 
-    return null;
+    const previous = this.lastSpokenText
+      ? `\n上一句你刚说过：「${this.lastSpokenText.slice(0, 60)}」，不要重复。`
+      : '';
+    return `observe: 用户正在「${activity.slice(0, 80)}」${previous}`;
   }
 
   private ensureAudible(event: string, plan: UtterancePlan): UtterancePlan {
     if (plan.say) return plan;
-    if (!event.startsWith('ambient:') && !event.startsWith('return:')) return plan;
+    if (!event.startsWith('return:')) return plan;
 
-    const text =
-      event.startsWith('return:')
-        ? '回来了。刚才那会儿我帮你看着。'
-        : `我还在。${(this.state.activity ?? '你先忙。').slice(0, 60)}`;
+    const text = '回来了。刚才那会儿我帮你看着。';
     return {
       ...plan,
       say: true,
@@ -731,13 +605,6 @@ export class BrainService {
       motion: 'think',
       reason: '主动反馈保底',
     };
-  }
-
-  private canProactive(critical: boolean): boolean {
-    const settings = this.memory.getSettings();
-    if (settings.dnd) return false;
-    const cooldown = critical ? 60_000 : settings.proactiveCooldownMs;
-    return Date.now() - this.lastProactiveAt >= cooldown;
   }
 
   async simulateTest(result: 'pass' | 'fail'): Promise<UtterancePayload> {

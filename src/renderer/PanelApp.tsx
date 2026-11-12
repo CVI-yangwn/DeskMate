@@ -75,7 +75,6 @@ export default function PanelApp() {
   const [newKind, setNewKind] = useState<MemoryKind>('fact');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [excludedDraft, setExcludedDraft] = useState('');
-  const [budgetDraft, setBudgetDraft] = useState('30');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [editKind, setEditKind] = useState<MemoryKind>('fact');
@@ -245,7 +244,6 @@ export default function PanelApp() {
   async function openSettings() {
     if (!status) return;
     setExcludedDraft(status.excludedApps.join('\n'));
-    setBudgetDraft(String(status.visionBudgetPerHour));
     setSettingsOpen(true);
   }
 
@@ -255,9 +253,8 @@ export default function PanelApp() {
       .split(/[\n,，]+/)
       .map((item) => item.trim())
       .filter(Boolean);
-    const budget = Math.min(120, Math.max(1, Math.round(Number(budgetDraft) || 30)));
     try {
-      const next = await window.deskmate.setPrivacySettings(apps, budget);
+      const next = await window.deskmate.setPrivacySettings(apps);
       setStatus(next);
       setSettingsOpen(false);
     } catch (error) {
@@ -519,7 +516,7 @@ export default function PanelApp() {
       : state?.captureKind === 'window'
         ? '前台窗口'
         : '';
-  const scanStats = status?.scanStats ?? { total: 0, analyzed: 0, cacheHits: 0 };
+  const scanStats = status?.scanStats ?? { total: 0, analyzed: 0 };
   const memoryFilters = [
     { key: 'all' as const, label: '全部', count: filterCounts.all },
     { key: 'project' as const, label: '项目', count: filterCounts.project },
@@ -616,10 +613,10 @@ export default function PanelApp() {
             {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}
             {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
             <span>
-              扫描 {scanStats.total} · 分析 {scanStats.analyzed} · 缓存 {scanStats.cacheHits}
+              扫描 {scanStats.total} 次 · 分析 {scanStats.analyzed} 次
             </span>
             <span>
-              视觉 {status?.visionCallsThisHour ?? 0}/{status?.visionBudgetPerHour ?? 30}
+              视觉 {status?.visionCallsThisHour ?? 0} 次/小时
             </span>
             {stateStale && <span className="stale-text">状态可能过期</span>}
           </div>
@@ -771,7 +768,7 @@ export default function PanelApp() {
             <div className="sheet-handle" />
             <div className="sheet-head">
               <div>
-                <h2>隐私与成本</h2>
+                <h2>隐私设置</h2>
                 <p>这些设置只影响后续自动扫描，不会主动弹出面板。</p>
               </div>
               <button className="icon-button" onClick={() => setSettingsOpen(false)} title="关闭">
@@ -791,27 +788,8 @@ export default function PanelApp() {
               />
             </div>
 
-            <div className="settings-section">
-              <label htmlFor="vision-budget">每小时视觉预算</label>
-              <p>超过后只做本地 OCR，不再调用视觉模型。</p>
-              <div className="settings-inline">
-                <input
-                  id="vision-budget"
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={budgetDraft}
-                  onChange={(event) => setBudgetDraft(event.target.value)}
-                />
-                <span>次 / 小时</span>
-                <span className="settings-current">
-                  本小时已用 {status?.visionCallsThisHour ?? 0} 次
-                </span>
-              </div>
-            </div>
-
             <div className="settings-note">
-              暂停感知、勿扰和语音开关仍在主面板操作；这里只管隐私排除和成本上限。
+              每次扫描都会调用视觉模型和主动判断，不再按视觉预算限流。暂停感知、勿扰和语音开关仍在主面板操作。
             </div>
 
             <div className="settings-actions">
