@@ -189,6 +189,7 @@ git status
 - **内网 oneapi**：`https://oneapi-comate.baidu-int.com/v1`，需要公司网络/VPN。`/v1/models` 已返回 200；`DeepSeek-V4.1-Flash` 文本/JSON、`DeepSeek-V4-Flash-Vision-Exp` 识图、chat 都已实测通过。
 - **屏幕扫描依赖权限**：macOS 没给 Screen Recording 时，`desktopCapturer` 返回空；面板会提示。
 - **整屏截图会包含同屏其他窗口**：默认抓聚焦显示器整屏；如果同屏有隐私排除应用可见，会退回前台窗口截图。若希望始终只抓窗口，可以把 `captureFocusedDisplay()` 换回 `captureActiveWindow()`。
+- **整屏隐私回退依赖 Accessibility**：没有辅助功能权限时，`get-windows` 读不到同屏窗口列表，只能保证前台应用被排除；授权后才会执行“同屏有隐私应用则退回窗口截图”。读取失败会在 4–5 秒后超时，不会卡死扫描。
 - **自动扫描成本**：每 60 秒一张低细节图，每张最多约 1024 tokens；个人强度约几美元/月。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。

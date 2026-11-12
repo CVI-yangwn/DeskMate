@@ -597,8 +597,8 @@ export class BrainService {
 
     this.state = {
       ...this.state,
-      app: inspection.app || captured.app,
-      windowTitle: inspection.title || captured.title,
+      app: captured.app || inspection.app,
+      windowTitle: captured.title || inspection.title,
       activity: inspection.activity || this.state.activity,
       testResult: nextTest,
       idleSec,
@@ -613,7 +613,7 @@ export class BrainService {
       captureKind: captured.captureKind,
       displayName: captured.displayName,
       evidence: evidence.slice(0, 8),
-      focusMin: this.nextFocusMin(idleSec, analyzedAt, inspection.app || captured.app),
+      focusMin: this.nextFocusMin(idleSec, analyzedAt, captured.app || inspection.app),
     };
 
     let planPayload: UtterancePayload | null = null;
