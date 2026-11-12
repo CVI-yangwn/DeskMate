@@ -276,6 +276,7 @@ export class BrainService {
   getAvatarConfig(): AvatarConfig {
     const candidates = [
       path.join(process.cwd(), 'config/avatar.haru.json'),
+      path.join(app.getPath('userData'), 'config/avatar.haru.json'),
       path.join(app.getAppPath(), 'config/avatar.haru.json'),
       path.join(process.resourcesPath, 'config/avatar.haru.json'),
     ];

@@ -73,6 +73,7 @@ npm run dev
 
 > `.env.local` 已被 `.gitignore` 忽略。不要把 key 提交到仓库。
 > 没有有效 key 时，应用会自动使用本地 mock，不会崩。
+> 打包后，`.env.local` 和 `config/avatar.haru.json` 也可以放在 `~/Library/Application Support/DeskMate/`。
 
 ### 构建与检查
 
@@ -189,7 +190,7 @@ git status
 - **自动扫描成本**：每 60 秒一张低细节图，每张最多约 1024 tokens；个人强度约几美元/月。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。
-- **打包还没闭环**：`config/avatar.haru.json`、`native/ocr` 和 `.env.local` 的打包/用户目录路径还没接进 DMG 流程。
+- **打包还没闭环**：仍缺 electron-builder/DMG 流程；代码已支持从 userData 读取 `.env.local` 和 `config/avatar.haru.json`，`native/ocr` 需要随应用放进 resources。
 - **事件桥没有 token**：已经限制为本机 Origin + JSON Content-Type，但同机进程仍可调用；后续可以加一次性 token。
 
 ## 下一步

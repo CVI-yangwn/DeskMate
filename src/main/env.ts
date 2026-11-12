@@ -38,6 +38,8 @@ function loadFiles(): Record<string, string> {
   const candidates = [
     path.join(process.cwd(), '.env.local'),
     path.join(process.cwd(), '.env'),
+    path.join(app.getPath('userData'), '.env.local'),
+    path.join(app.getPath('userData'), '.env'),
     path.join(app.getAppPath(), '.env.local'),
     path.join(app.getAppPath(), '.env'),
   ];
