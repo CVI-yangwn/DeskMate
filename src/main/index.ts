@@ -89,8 +89,23 @@ function createTray(): void {
     tray = new Tray(icon);
     tray.setToolTip('同桌 DeskMate');
 
+    const moveToCursorDisplay = () => {
+      const win = getAvatarWindow();
+      if (!win) return;
+      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      const [width, height] = win.getSize();
+      const area = display.workArea;
+      const position = {
+        x: Math.round(area.x + area.width - width - 22),
+        y: Math.round(area.y + area.height - height - 22),
+      };
+      setAvatarPosition(position);
+      brain.saveAvatarPosition(position);
+    };
+
     const menu = Menu.buildFromTemplate([
       { label: '打开面板', click: () => showPanel() },
+      { label: '把 Haru 叫到当前屏幕', click: moveToCursorDisplay },
       { type: 'separator' },
       {
         label: '模拟测试通过',
@@ -138,6 +153,28 @@ function performUtterance(
   const payload: UtterancePayload = { plan, state, speakingMs, source, origin };
   sendToAll('avatar:perform', payload);
   return payload;
+}
+
+function sendScanStartBubble(): void {
+  const win = getAvatarWindow();
+  if (!win) return;
+  const payload: UtterancePayload = {
+    plan: {
+      say: true,
+      displayText: '让我看看…',
+      speechText: '',
+      emotion: 'think',
+      motion: 'think',
+      urgency: 'low',
+      evidenceIds: ['scan-start'],
+      reason: '扫描开始',
+    },
+    state: brain.getStatus().state,
+    speakingMs: 0,
+    source: 'mock',
+    origin: 'scan',
+  };
+  win.webContents.send('avatar:perform', payload);
 }
 
 function buildScanFeedback(result: ScanResult): UtterancePayload {
@@ -191,6 +228,7 @@ function sendStartupGreeting(): void {
 }
 
 async function scanAndBroadcast(interactive = false) {
+  if (interactive) sendScanStartBubble();
   const result = await brain.scanScreen();
   if (result.plan) {
     sendToAll('avatar:perform', result.plan);
