@@ -78,7 +78,7 @@ export class BrainService {
   private apiStatus: ApiStatus;
   private apiMessage: string;
   private lastScanStartedAt = 0;
-  private lastSpokenAt = Date.now();
+  private lastSpokenAt = 0;
   private lastSpokenText = '';
   private lastFocusMilestone = 0;
   private lastIdleNudgeAt = 0;
