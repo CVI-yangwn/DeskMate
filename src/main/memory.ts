@@ -24,6 +24,9 @@ const MAX_FACTS = 100;
 const MAX_MESSAGES = 200;
 const FACT_COLUMNS =
   'id, text, kind, pinned, source, confidence, created_at, updated_at, last_used_at, use_count';
+const FACT_COLUMNS_F = FACT_COLUMNS.split(',')
+  .map((column) => `f.${column.trim()}`)
+  .join(', ');
 const SOURCE_PRIORITY: Record<MemorySource, number> = {
   explicit: 4,
   tool: 3,
@@ -472,7 +475,7 @@ export class MemoryStore {
         const ftsQuery = `"${clean.replace(/"/g, '""')}"`;
         rows = this.db
           .prepare(
-            `SELECT f.id, f.text, f.kind, f.pinned, f.created_at, f.updated_at
+            `SELECT ${FACT_COLUMNS_F}
              FROM facts_fts
              JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?
