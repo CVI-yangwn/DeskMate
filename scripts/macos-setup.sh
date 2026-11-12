@@ -6,12 +6,22 @@ cd "$(dirname "$0")/.."
 echo "== DeskMate macOS setup =="
 echo "project: $(pwd)"
 
-if ! command -v node >/dev/null 2>&1; then
-  LOCAL_NODE="$PWD/.node/node-v22.23.4-darwin-arm64/bin"
-  if [ -x "$LOCAL_NODE/node" ]; then
-    export PATH="$LOCAL_NODE:$PATH"
-    echo "using bundled node: $LOCAL_NODE"
-  fi
+NODE_MAJOR=0
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+fi
+
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  shopt -s nullglob
+  for candidate in "$PWD"/.node/node-*/bin; do
+    if [ -x "$candidate/node" ]; then
+      export PATH="$candidate:$PATH"
+      echo "using bundled node: $candidate"
+      NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+      break
+    fi
+  done
+  shopt -u nullglob
 fi
 
 if ! command -v node >/dev/null 2>&1; then
@@ -19,7 +29,6 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 if [ "$NODE_MAJOR" -lt 22 ]; then
   echo "ERROR: Node $(node -v) 太旧，需要 22+。" >&2
   exit 1
