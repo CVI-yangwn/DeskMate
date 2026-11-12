@@ -92,6 +92,11 @@ function toInfo(win: {
   };
 }
 
+function sourceWindowId(sourceId: string): string | null {
+  const match = /^window:(\d+):/.exec(sourceId);
+  return match?.[1] ?? null;
+}
+
 export async function readActiveWindow(): Promise<ActiveWindowInfo | null> {
   try {
     const win = await activeWindow();
@@ -132,7 +137,7 @@ export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedWind
 
     const source =
       (current?.id
-        ? sources.find((item) => item.id.endsWith(String(current.id)))
+        ? sources.find((item) => sourceWindowId(item.id) === String(current.id))
         : undefined) ??
       sources.find((item) => item.name === current?.title) ??
       sources[0];
