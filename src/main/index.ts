@@ -9,7 +9,14 @@ import {
 } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChatMessage, HitRect } from '../shared/types';
+import type {
+  ChatMessage,
+  DemoState,
+  HitRect,
+  ScanResult,
+  UtterancePayload,
+  UtterancePlan,
+} from '../shared/types';
 import { BrainService } from './brain';
 import { startEventBridge, type EventBridge } from './eventBridge';
 import { readActiveWindow } from './perception';
@@ -120,10 +127,82 @@ async function runDemo(result: 'pass' | 'fail') {
   return payload;
 }
 
-async function scanAndBroadcast() {
+function performUtterance(
+  plan: UtterancePlan,
+  state: DemoState,
+  source: 'deepseek' | 'mock',
+  origin: 'scan' | 'proactive' | 'demo',
+): UtterancePayload {
+  const speakingMs =
+    brain.isVoiceEnabled() && plan.say ? speakWithSay(plan.speechText) : 0;
+  const payload: UtterancePayload = { plan, state, speakingMs, source, origin };
+  sendToAll('avatar:perform', payload);
+  return payload;
+}
+
+function buildScanFeedback(result: ScanResult): UtterancePayload {
+  const text = (
+    result.changed && result.state.activity
+      ? result.state.activity
+      : result.message
+  )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 90);
+  const displayText = text || '我看了一眼屏幕。';
+  return performUtterance(
+    {
+      say: true,
+      displayText,
+      speechText: displayText.slice(0, 120),
+      emotion: 'think',
+      motion: 'think',
+      urgency: 'low',
+      evidenceIds: ['scan'],
+      reason: '手动扫描反馈',
+    },
+    result.state,
+    result.source === 'deepseek' ? 'deepseek' : 'mock',
+    'scan',
+  );
+}
+
+function sendStartupGreeting(): void {
+  if (!brain || brain.isDnd()) return;
+  console.info('[presence] startup greeting');
+  const text = brain.isVoiceEnabled()
+    ? '我来了。今天也一起上班吧。'
+    : '我来了。语音现在静音，点我打开面板可以开声音。';
+  performUtterance(
+    {
+      say: true,
+      displayText: text,
+      speechText: text,
+      emotion: 'smile',
+      motion: 'tease',
+      urgency: 'low',
+      evidenceIds: ['startup'],
+      reason: '启动问候',
+    },
+    brain.getStatus().state,
+    'mock',
+    'proactive',
+  );
+}
+
+async function scanAndBroadcast(interactive = false) {
   const result = await brain.scanScreen();
-  if (result.plan) sendToAll('avatar:perform', result.plan);
+  if (result.plan) {
+    sendToAll('avatar:perform', result.plan);
+  } else if (interactive) {
+    // 手动扫描至少要给一个可见反馈，不能“点了没反应”。
+    result.plan = buildScanFeedback(result);
+    console.info('[presence] interactive scan feedback');
+  }
   lastForegroundKey = `${result.state.app ?? ''}|${result.state.windowTitle ?? ''}`;
+  console.info(
+    `[scan] ${result.changed ? 'changed' : 'cached'} source=${result.source} ${result.durationMs}ms capture=${result.state.captureKind ?? 'window'}`,
+  );
   sendToAll('status:changed', brain.getStatus());
   return result;
 }
@@ -196,7 +275,7 @@ function registerIpc(): void {
 
   ipcMain.handle('demo:test', (_event, result: 'pass' | 'fail') => runDemo(result));
 
-  ipcMain.handle('screen:scan', () => scanAndBroadcast());
+  ipcMain.handle('screen:scan', () => scanAndBroadcast(true));
 
   ipcMain.handle(
     'chat:send',
@@ -338,6 +417,9 @@ app.whenReady().then(async () => {
   }
 
   startPerceptionLoop();
+
+  // 启动后先露个面，让用户知道搭子在。
+  setTimeout(sendStartupGreeting, 2500);
 
   if (process.platform === 'darwin') {
     app.dock?.hide();

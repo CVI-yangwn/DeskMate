@@ -77,6 +77,10 @@ export default function AvatarApp() {
         onHitRect={onHitRect}
         onOpenPanel={onOpenPanel}
       />
+      <div className="avatar-presence">
+        <span className="presence-dot" />
+        同桌 · 在线
+      </div>
       <Bubble
         ref={bubbleRef}
         text={plan?.displayText ?? ''}

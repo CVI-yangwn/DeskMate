@@ -460,6 +460,7 @@ export default function PanelApp() {
     ? '你离开了一会儿。解锁后我会继续看着。'
     : meaningful(state?.activity) || '还没有扫描。点一下“扫描屏幕”，我看看你在做什么。';
   const appInitial = locked ? '锁' : (rawApp || '同').trim().slice(0, 1).toUpperCase();
+  const noForeground = !rawApp || rawApp === 'Desktop';
   const perceptionPaused = (status?.perceptionPausedUntil ?? 0) > Date.now();
   const analyzedAt = state?.lastAnalyzedAt ?? state?.lastScanAt;
   const stateStale = Boolean(analyzedAt && Date.now() - analyzedAt > 5 * 60_000);
@@ -609,6 +610,7 @@ export default function PanelApp() {
 
           <div className="context-insight" title={state?.evidence?.join('\n') || undefined}>
             {captureLabel && <span className="capture-chip">{captureLabel}</span>}
+            {noForeground && <span className="stale-text">未读前台应用</span>}
             <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
             <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
             {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}

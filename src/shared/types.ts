@@ -157,7 +157,7 @@ export interface UtterancePayload {
   state: DemoState;
   speakingMs: number;
   source: 'deepseek' | 'mock';
-  origin: 'chat' | 'proactive' | 'demo';
+  origin: 'chat' | 'proactive' | 'demo' | 'scan';
 }
 
 export interface ChatReply {

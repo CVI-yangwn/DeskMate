@@ -35,6 +35,8 @@ import {
 } from './perception';
 import { speakWithSay } from './tts';
 
+const AMBIENT_INTERVAL_MS = 8 * 60_000;
+
 const INITIAL_STATE: DemoState = {
   testResult: 'none',
   focusMin: 0,
@@ -99,6 +101,8 @@ export class BrainService {
   private lastProactiveAt = 0;
   private lastFocusMilestone = 0;
   private lastIdleNudgeAt = 0;
+  private lastAmbientAt = Date.now();
+  private lastIdleSec = 0;
   private lastUserAskedToRemember = false;
   private lastScreenHash = '';
   private lastScreenApp = '';
@@ -628,25 +632,29 @@ export class BrainService {
     }
 
     if (event && this.canProactive(critical)) {
+      console.info(`[proactive] ${event.split(':')[0]}`);
       if (event.startsWith('idle:')) {
         this.lastIdleNudgeAt = now;
       } else if (event.startsWith('focus-milestone:')) {
         this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+      } else if (event.startsWith('ambient:')) {
+        this.lastAmbientAt = now;
       }
 
       const generated = await this.generatePlan(event);
+      const plan = this.ensureAudible(event, generated.plan);
       const speakingMs =
-        this.isVoiceEnabled() && generated.plan.say ? speakWithSay(generated.plan.speechText) : 0;
+        this.isVoiceEnabled() && plan.say ? speakWithSay(plan.speechText) : 0;
       planPayload = {
-        plan: generated.plan,
+        plan,
         state: { ...this.state },
         speakingMs,
         source: generated.source,
         origin: 'proactive',
       };
       this.lastProactiveAt = Date.now();
-      if (generated.plan.say) {
-        this.memory.appendMessage('assistant', generated.plan.displayText);
+      if (plan.say) {
+        this.memory.appendMessage('assistant', plan.displayText);
       }
     }
 
@@ -673,7 +681,14 @@ export class BrainService {
   }
 
   private pickProactiveEvent(idleSec: number, now: number): string | null {
+    const wasIdle = this.lastIdleSec;
+    this.lastIdleSec = idleSec;
     if (this.memory.getSettings().dnd) return null;
+
+    // 离开 10 分钟以上再回来，先打个招呼。
+    if (wasIdle >= 600 && idleSec < 60) {
+      return `return: 用户离开 ${Math.round(wasIdle / 60)} 分钟后回来了`;
+    }
 
     if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
 
@@ -686,7 +701,36 @@ export class BrainService {
       return `focus-milestone: 连续专注 ${this.state.focusMin} 分钟`;
     }
 
+    // 没有大事发生时，也要偶尔说一句，让搭子有存在感。
+    if (
+      this.state.focusMin >= 2 &&
+      this.state.activity &&
+      this.state.activity !== INITIAL_STATE.activity &&
+      now - this.lastAmbientAt >= AMBIENT_INTERVAL_MS
+    ) {
+      return `ambient: 用户正在「${this.state.activity.slice(0, 80)}」`;
+    }
+
     return null;
+  }
+
+  private ensureAudible(event: string, plan: UtterancePlan): UtterancePlan {
+    if (plan.say) return plan;
+    if (!event.startsWith('ambient:') && !event.startsWith('return:')) return plan;
+
+    const text =
+      event.startsWith('return:')
+        ? '回来了。刚才那会儿我帮你看着。'
+        : `我还在。${(this.state.activity ?? '你先忙。').slice(0, 60)}`;
+    return {
+      ...plan,
+      say: true,
+      displayText: text,
+      speechText: text,
+      emotion: 'think',
+      motion: 'think',
+      reason: '主动反馈保底',
+    };
   }
 
   private canProactive(critical: boolean): boolean {

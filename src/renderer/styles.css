@@ -112,6 +112,33 @@ body[data-route="panel"] ::selection {
   cursor: grabbing;
 }
 
+.avatar-presence {
+  position: absolute;
+  right: 10px;
+  bottom: 6px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(19, 16, 29, 0.62);
+  backdrop-filter: blur(10px);
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.presence-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 7px rgba(98, 227, 164, 0.8);
+}
+
 .bubble {
   position: absolute;
   top: 14px;
