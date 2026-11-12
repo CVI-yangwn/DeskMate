@@ -1,0 +1,96 @@
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import type {
+  AppStatus,
+  AvatarConfig,
+  ChatMessage,
+  ChatReply,
+  DeskMateApi,
+  HitRect,
+  MemoryFact,
+  ScanResult,
+  UtterancePayload,
+} from '../shared/types';
+
+const api: DeskMateApi = {
+  getStatus: () => ipcRenderer.invoke('app:status') as Promise<AppStatus>,
+
+  getAvatarConfig: () =>
+    ipcRenderer.invoke('avatar:config') as Promise<AvatarConfig>,
+
+  testConnection: () => ipcRenderer.invoke('api:test') as Promise<AppStatus>,
+
+  scanScreen: () => ipcRenderer.invoke('screen:scan') as Promise<ScanResult>,
+
+  simulateTest: (result) =>
+    ipcRenderer.invoke('demo:test', result) as Promise<UtterancePayload>,
+
+  chat: (text: string, history: ChatMessage[] = []) =>
+    ipcRenderer.invoke('chat:send', text, history) as Promise<ChatReply>,
+
+  getChatHistory: () => ipcRenderer.invoke('chat:history') as Promise<ChatMessage[]>,
+
+  getMemoryFacts: () => ipcRenderer.invoke('memory:facts') as Promise<MemoryFact[]>,
+
+  addMemory: (text: string, kind?: 'project' | 'preference' | 'fact') =>
+    ipcRenderer.invoke('memory:add', text, kind) as Promise<AppStatus>,
+
+  updateMemory: (id: string, text: string, kind: 'project' | 'preference' | 'fact') =>
+    ipcRenderer.invoke('memory:update', id, text, kind) as Promise<AppStatus>,
+
+  pinFact: (id: string, pinned: boolean) =>
+    ipcRenderer.invoke('memory:pin', id, pinned) as Promise<AppStatus>,
+
+  setAutoMemory: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-auto-memory', enabled) as Promise<AppStatus>,
+
+  clearMemory: () => ipcRenderer.invoke('memory:clear') as Promise<AppStatus>,
+
+  forgetFact: (id: string) =>
+    ipcRenderer.invoke('memory:forget', id) as Promise<AppStatus>,
+
+  setDnd: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-dnd', enabled) as Promise<AppStatus>,
+
+  setVoice: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-voice', enabled) as Promise<AppStatus>,
+
+  pausePerception: (minutes: number) =>
+    ipcRenderer.invoke('perception:pause', minutes) as Promise<AppStatus>,
+
+  resumePerception: () =>
+    ipcRenderer.invoke('perception:resume') as Promise<AppStatus>,
+
+  setPrivacySettings: (excludedApps: string[], visionBudgetPerHour: number) =>
+    ipcRenderer.invoke('settings:set-privacy', excludedApps, visionBudgetPerHour) as Promise<AppStatus>,
+
+  openPanel: () => ipcRenderer.invoke('panel:open') as Promise<void>,
+
+  closePanel: () => ipcRenderer.invoke('panel:close') as Promise<void>,
+
+  setHitRect: (rect: HitRect) =>
+    ipcRenderer.invoke('avatar:hit-rect', rect) as Promise<void>,
+
+  beginAvatarDrag: () => ipcRenderer.send('avatar:drag-start'),
+
+  moveAvatar: (dx: number, dy: number) => ipcRenderer.send('avatar:drag-move', dx, dy),
+
+  endAvatarDrag: () => ipcRenderer.send('avatar:drag-end'),
+
+  onUtterance: (callback: (payload: UtterancePayload) => void) => {
+    const listener = (_event: IpcRendererEvent, payload: UtterancePayload) => {
+      callback(payload);
+    };
+    ipcRenderer.on('avatar:perform', listener);
+    return () => ipcRenderer.removeListener('avatar:perform', listener);
+  },
+
+  onStatus: (callback: (status: AppStatus) => void) => {
+    const listener = (_event: IpcRendererEvent, status: AppStatus) => {
+      callback(status);
+    };
+    ipcRenderer.on('status:changed', listener);
+    return () => ipcRenderer.removeListener('status:changed', listener);
+  },
+};
+
+contextBridge.exposeInMainWorld('deskmate', api);

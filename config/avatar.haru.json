@@ -1,0 +1,32 @@
+{
+  "schema": "deskmate.avatar/1",
+  "id": "haru",
+  "name": "Haru",
+  "model": "./live2d/haru/Haru.model3.json",
+  "scale": 0.82,
+  "anchor": [0.5, 1.0],
+  "lipSync": {
+    "param": "ParamMouthOpenY",
+    "gain": 3.0,
+    "max": 1.0
+  },
+  "expressions": {
+    "neutral": null,
+    "smile": "F01",
+    "surprised": "F02",
+    "angry": "F03",
+    "sad": "F04",
+    "happy": "F05",
+    "serious": "F06",
+    "embarrassed": "F07",
+    "disappointed": "F08"
+  },
+  "motions": {
+    "idle": ["Idle"],
+    "celebrate": ["TapBody", 0],
+    "tease": ["TapBody", 1],
+    "comfort": ["TapBody", 2],
+    "think": ["TapBody", 3]
+  },
+  "hitAreas": ["Head", "Body"]
+}

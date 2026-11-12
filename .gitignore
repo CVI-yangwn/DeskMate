@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+.node/
+.npm-cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.db
+*.db-wal
+*.db-shm
+.cache/
+.electron-cache/
+.chrome-*/
+native/ocr
