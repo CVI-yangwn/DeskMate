@@ -32,9 +32,6 @@ import {
 import { speakWithSay } from './tts';
 
 const INITIAL_STATE: DemoState = {
-  project: 'unknown',
-  file: 'unknown',
-  testCommand: 'unknown',
   testResult: 'none',
   focusMin: 0,
   idleSec: 0,
@@ -107,6 +104,7 @@ export class BrainService {
   private lastOcrText = '';
   private lastOcrCritical = new Set<string>();
   private scanStats = { total: 0, analyzed: 0, cacheHits: 0 };
+  private scanInFlight: Promise<ScanResult> | null = null;
   private visionHourStartedAt = Date.now();
   private visionCallsThisHour = 0;
 
@@ -351,6 +349,25 @@ export class BrainService {
   }
 
   async scanScreen(allowProactive = true): Promise<ScanResult> {
+    if (this.scanInFlight) return this.scanInFlight;
+
+    const inFlight = this.performScan(allowProactive);
+    this.scanInFlight = inFlight;
+    try {
+      return await inFlight;
+    } finally {
+      if (this.scanInFlight === inFlight) this.scanInFlight = null;
+    }
+  }
+
+  private nextFocusMin(idleSec: number, at: number, app?: string): number {
+    if (idleSec >= 300 || app === 'loginwindow') return 0;
+    const gap = at - (this.state.lastScanAt ?? at);
+    if (!Number.isFinite(gap) || gap < 0 || gap > 10 * 60_000) return 0;
+    return this.state.focusMin + Math.round(gap / 60_000);
+  }
+
+  private async performScan(allowProactive: boolean): Promise<ScanResult> {
     const started = Date.now();
     const now = started;
     if (now - this.lastScanStartedAt < 2500) {
@@ -384,6 +401,7 @@ export class BrainService {
         confidence: 1,
         evidence: ['隐私排除规则命中'],
         unchangedCount: this.unchangedCount,
+        focusMin: this.nextFocusMin(idleSec, Date.now(), active.app),
       };
       this.emit();
       return {
@@ -447,11 +465,7 @@ export class BrainService {
         lastScanAt: Date.now(),
         lastCheckedAt: Date.now(),
         unchangedCount: this.unchangedCount,
-        focusMin:
-          idleSec > 300
-            ? this.state.focusMin
-            : this.state.focusMin +
-              Math.round((Date.now() - (this.state.lastScanAt ?? Date.now())) / 60000),
+        focusMin: this.nextFocusMin(idleSec, Date.now(), active?.app ?? this.state.app),
       };
       this.emit();
 
@@ -570,11 +584,7 @@ export class BrainService {
       ocrLines: ocr?.lines.length ?? 0,
       lastUpdated: analyzedAt,
       evidence: evidence.slice(0, 8),
-      focusMin:
-        idleSec > 300
-          ? this.state.focusMin
-          : this.state.focusMin +
-            Math.round((analyzedAt - (this.state.lastScanAt ?? analyzedAt)) / 60000),
+      focusMin: this.nextFocusMin(idleSec, analyzedAt, inspection.app || captured.app),
     };
 
     let planPayload: UtterancePayload | null = null;
@@ -589,6 +599,12 @@ export class BrainService {
     }
 
     if (event && this.canProactive(critical)) {
+      if (event.startsWith('idle:')) {
+        this.lastIdleNudgeAt = now;
+      } else if (event.startsWith('focus-milestone:')) {
+        this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+      }
+
       const generated = await this.generatePlan(event);
       const speakingMs =
         this.isVoiceEnabled() && generated.plan.say ? speakWithSay(generated.plan.speechText) : 0;
@@ -631,14 +647,12 @@ export class BrainService {
     if (this.memory.getSettings().dnd) return null;
 
     if (idleSec >= 600 && now - this.lastIdleNudgeAt >= 30 * 60_000) {
-      this.lastIdleNudgeAt = now;
       return `idle: 用户已经 ${Math.round(idleSec / 60)} 分钟没有操作`;
     }
 
-    if (this.state.focusMin < 5) this.lastFocusMilestone = 0;
+    if (this.state.focusMin < 25) this.lastFocusMilestone = 0;
     const milestone = Math.floor(this.state.focusMin / 25);
     if (this.state.focusMin >= 25 && milestone > this.lastFocusMilestone && idleSec < 300) {
-      this.lastFocusMilestone = milestone;
       return `focus-milestone: 连续专注 ${this.state.focusMin} 分钟`;
     }
 
@@ -695,6 +709,8 @@ export class BrainService {
     if (!message) return { text: '你说。', source: 'mock' };
 
     const autoMemoryEnabled = this.memory.getSettings().autoMemory;
+    const explicitRemember = /(记住|记一下|别忘|以后都|以后请)/.test(message);
+    this.lastUserAskedToRemember = explicitRemember;
     const memoryText = `${
       autoMemoryEnabled
         ? '【自动记忆已开启：稳定的偏好/项目会自动保存，不需要询问用户是否记住。】\n'
@@ -706,16 +722,23 @@ export class BrainService {
 
     if (this.shouldTryApi()) {
       try {
-        this.lastUserAskedToRemember = /(记住|记一下|别忘|以后都|以后请)/.test(message);
         replyText = await this.client.chatWithTools(
           this.state,
           history,
           message,
           memoryText,
           AGENT_TOOLS,
-          (name, args) => {
-            if (name === 'remember') rememberedByTool = true;
-            return this.executeTool(name, args);
+          async (name, args) => {
+            const output = await this.executeTool(name, args);
+            if (
+              name === 'remember' &&
+              output &&
+              typeof output === 'object' &&
+              (output as { ok?: unknown }).ok === true
+            ) {
+              rememberedByTool = true;
+            }
+            return output;
           },
         );
         source = 'deepseek';
@@ -744,7 +767,7 @@ export class BrainService {
       source = 'mock';
     }
 
-    if (!autoMemoryEnabled && !this.lastUserAskedToRemember && /记(下|住)了/.test(replyText)) {
+    if (!autoMemoryEnabled && !explicitRemember && /记(下|住)了/.test(replyText)) {
       const remainder = replyText
         .split(/(?<=[。！？!?\n])/)
         .map((sentence) => sentence.trim())
