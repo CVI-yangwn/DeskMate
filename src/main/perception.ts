@@ -97,6 +97,21 @@ export function rectsIntersect(a: WindowBounds, b: WindowBounds): boolean {
   );
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function isSelfWindow(app: string, title: string): boolean {
   return app === 'DeskMate' || app === 'Electron' || title.includes('DeskMate');
 }
@@ -129,7 +144,7 @@ function sourceWindowId(sourceId: string): string | null {
 
 export async function readOpenWindows(): Promise<ActiveWindowInfo[]> {
   try {
-    const windows = await openWindows();
+    const windows = await withTimeout(openWindows(), 5_000, []);
     return windows
       .filter((candidate) => !isSelfWindow(candidate.owner.name, candidate.title))
       .map(toInfo);
@@ -140,7 +155,7 @@ export async function readOpenWindows(): Promise<ActiveWindowInfo[]> {
 
 export async function readActiveWindow(): Promise<ActiveWindowInfo | null> {
   try {
-    const win = await activeWindow();
+    const win = await withTimeout(activeWindow(), 4_000, null);
     if (win && !isSelfWindow(win.owner.name, win.title)) {
       return toInfo(win);
     }
@@ -184,10 +199,14 @@ async function captureDisplay(
 ): Promise<CapturedFrame | null> {
   const aspect = display.size.width > 0 ? display.size.height / display.size.width : 0.75;
   const thumbnailHeight = Math.max(1, Math.round(maxWidth * aspect));
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: { width: maxWidth, height: thumbnailHeight },
-  });
+  const sources = await withTimeout(
+    desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: maxWidth, height: thumbnailHeight },
+    }),
+    8_000,
+    [],
+  );
 
   const source =
     sources.find((item) => item.display_id === String(display.id)) ??
@@ -241,13 +260,17 @@ export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedFram
 
   const current = await readActiveWindow();
   try {
-    const sources = await desktopCapturer.getSources({
-      types: ['window'],
-      thumbnailSize: {
-        width: maxWidth,
-        height: Math.round(maxWidth * 0.75),
-      },
-    });
+    const sources = await withTimeout(
+      desktopCapturer.getSources({
+        types: ['window'],
+        thumbnailSize: {
+          width: maxWidth,
+          height: Math.round(maxWidth * 0.75),
+        },
+      }),
+      8_000,
+      [],
+    );
 
     if (sources.length === 0) return null;
 
