@@ -17,6 +17,13 @@ export async function startEventBridge(options: EventBridgeOptions): Promise<Eve
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+      res.writeHead(403);
+      res.end(JSON.stringify({ ok: false, error: 'origin not allowed' }));
+      return;
+    }
+
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -26,6 +33,19 @@ export async function startEventBridge(options: EventBridgeOptions): Promise<Eve
     if (req.method !== 'POST' || req.url !== '/event') {
       res.writeHead(404);
       res.end(JSON.stringify({ ok: false, error: 'not found' }));
+      return;
+    }
+
+    if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+      res.writeHead(415);
+      res.end(JSON.stringify({ ok: false, error: 'content-type must be application/json' }));
+      return;
+    }
+
+    const declaredLength = Number(req.headers['content-length'] ?? 0);
+    if (Number.isFinite(declaredLength) && declaredLength > 64 * 1024) {
+      res.writeHead(413);
+      res.end(JSON.stringify({ ok: false, error: 'body too large' }));
       return;
     }
 
