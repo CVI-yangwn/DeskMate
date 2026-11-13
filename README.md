@@ -11,7 +11,7 @@
 macOS 本机
 ├─ Electron 主进程
 │  ├─ 前台窗口：get-windows
-│  ├─ 屏幕截图：当前聚焦显示器整屏（desktopCapturer，按需 + 自动）
+│  ├─ 屏幕截图：所有显示器整屏（desktopCapturer，聚焦屏优先）
 │  ├─ 本地 OCR：native/ocr（macOS Vision）
 │  ├─ 记忆：SQLite + FTS5（node:sqlite）
 │  ├─ 大脑：DeepSeek 文本 + 视觉 + JSON + tool calls
@@ -33,7 +33,7 @@ macOS 本机
 | 桌面壳 | Electron + React + TypeScript |
 | 形象 | Live2D，默认 **Haru**（Cubism 3/4） |
 | 大脑 / 眼睛 | 百度内网 oneapi（OpenAI-compatible）：`DeepSeek-V4.1-Flash` 文本 + `DeepSeek-V4-Flash-Vision-Exp` 视觉 |
-| 感知 | 前台窗口 + 当前显示器整屏 + 本地 OCR + 空闲时间；**无 VS Code 依赖** |
+| 感知 | 前台窗口 + 所有显示器整屏 + 本地 OCR + 空闲时间；**无 VS Code 依赖** |
 | 嘴巴 | macOS `say` |
 | 耳朵 | macOS `SFSpeechRecognizer`（下一步） |
 | 记忆 | SQLite + FTS5（已实现） |
@@ -108,10 +108,10 @@ npm run check:model
 - **自动记忆**：可开关；稳定的偏好/项目会从聊天中自动沉淀，相似记忆自动合并；关闭后只有明确说“记住”才写入；
 - **工具调用**：`remember`、`search_memory`、`scan_screen`、`set_dnd`；
 - **勿扰与主动策略**：启动先打招呼；手动扫描一定给气泡反馈；普通观察同一活动 10 分钟内不重复，活动刚变化至少隔 3 分钟；离开 10 分钟回来会欢迎；连续专注 25 分钟或空闲 10 分钟也会主动关注；空闲/锁屏会重置专注计时；
-- **扫描当前屏幕**：抓当前前台窗口所在显示器的整屏 → macOS Vision 本地 OCR → `DeepSeek-V4-Flash-Vision-Exp` 视觉 → 更新活动/测试状态；同屏出现隐私排除应用时自动退回到前台窗口截图；
+- **扫描当前屏幕**：抓所有显示器的整屏（聚焦屏优先）→ 每块屏跑 macOS Vision 本地 OCR → 把多张图一起发给 `DeepSeek-V4-Flash-Vision-Exp` → 汇总更新活动/测试状态；任意屏出现隐私排除应用时自动退回到前台窗口截图；
 - **可信感知**：每次扫描都调用视觉模型；本地 OCR 作为证据和测试结果兜底，不再用它跳过 LLM；面板显示 OCR 行数、置信度、耗时、证据数和扫描/分析次数；
 - **自适应扫描**：默认 60 秒，窗口变化 12 秒内触发；空闲时降频；不再因为画面没变化而跳过视觉分析；可暂停感知 15 分钟；可通过 `DESKMATE_SCAN_INTERVAL_MS` / `DESKMATE_AUTO_SCAN=0` 调整；
-- **隐私**：可配置隐私排除应用（前台命中时不截图、不分析；整屏模式发现同屏可见的隐私应用时退回前台窗口）；视觉调用不再受预算限制；启动默认只显示 Haru，不自动弹出面板；
+- **隐私**：可配置隐私排除应用（前台命中时不截图、不分析；多屏整屏模式发现任意屏可见的隐私应用时退回前台窗口）；视觉调用不再受预算限制；启动默认只显示 Haru，不自动弹出面板；
 - **检测测试红→绿**：上一次截图是 fail、这次是 pass，就生成一句祝贺；
 - DeepSeek 可用时走真实模型，key 缺失/无效时自动回退 mock；
 - 托盘菜单、全局快捷键 `Cmd+Shift+Space` 打开/收起面板，`Cmd+Shift+M` 打开“今天”并直接记一下；
@@ -127,7 +127,6 @@ npm run check:model
 - 真正的本地 AI 语音（当前是 macOS `say`）；
 - DMG 打包、登录自启、代码签名；
 - 多显示器贴边/吸附（当前可拖动并保存位置）；
-- 多块显示器同时分析（当前一次只抓聚焦显示器整屏）。
 
 ## 目录
 
@@ -195,8 +194,8 @@ git status
 
 - **内网 oneapi**：`https://oneapi-comate.baidu-int.com/v1`，需要公司网络/VPN。`/v1/models` 已返回 200；`DeepSeek-V4.1-Flash` 文本/JSON、`DeepSeek-V4-Flash-Vision-Exp` 识图、chat 都已实测通过。
 - **屏幕扫描依赖权限**：macOS 没给 Screen Recording 时，`desktopCapturer` 返回空；面板会提示。
-- **整屏截图会包含同屏其他窗口**：默认抓聚焦显示器整屏；如果同屏有隐私排除应用可见，会退回前台窗口截图。若希望始终只抓窗口，可以把 `captureFocusedDisplay()` 换回 `captureActiveWindow()`。
-- **整屏隐私回退依赖 Accessibility**：没有辅助功能权限时，`get-windows` 读不到同屏窗口列表，只能保证前台应用被排除；授权后才会执行“同屏有隐私应用则退回窗口截图”。读取失败会在 4–5 秒后超时，不会卡死扫描。
+- **多屏截图会包含其他窗口**：默认抓所有显示器整屏；如果任意屏有隐私排除应用可见，会退回前台窗口截图。若希望始终只抓窗口，可以把 `captureAllDisplays()` 换回 `captureActiveWindow()`。
+- **多屏隐私回退依赖 Accessibility**：没有辅助功能权限时，`get-windows` 读不到其他屏的窗口列表，只能保证前台应用被排除；授权后才会执行“任意屏有隐私应用则退回窗口截图”。读取失败会在 4–5 秒后超时，不会卡死扫描。
 - **自动扫描成本**：每轮扫描都会调用视觉模型 + 一次主动判断；默认 60 秒一轮，成本比原来的“只在有大事时说话”高。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。
