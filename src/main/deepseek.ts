@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type {
+  AnchorKind,
   ChatMessage,
   DemoState,
   Emotion,
@@ -79,6 +80,40 @@ const memoryExtractionSchema = z.object({
     .default([]),
 });
 
+
+const companionSignalSchema = z.object({
+  facts: z
+    .array(
+      z.object({
+        text: z.string().max(300),
+        kind: z.enum(['project', 'preference', 'fact']).default('fact'),
+        confidence: z.number().min(0).max(1).default(0.8),
+      }),
+    )
+    .max(3)
+    .default([]),
+  anchors: z
+    .array(
+      z.object({
+        text: z.string().max(120),
+        kind: z.enum(['work', 'feeling', 'open_loop', 'moment']).default('work'),
+        confidence: z.number().min(0).max(1).default(0.7),
+      }),
+    )
+    .max(2)
+    .default([]),
+  commitments: z
+    .array(
+      z.object({
+        text: z.string().max(120),
+        dueHint: z.string().max(40).optional(),
+        confidence: z.number().min(0).max(1).default(0.7),
+      }),
+    )
+    .max(1)
+    .default([]),
+});
+
 const planSchema = z.object({
   say: z.boolean().default(false),
   displayText: z.string().max(180).default(''),
@@ -125,6 +160,25 @@ export interface MemoryCandidate {
   confidence: number;
 }
 
+
+export interface CompanionAnchorCandidate {
+  text: string;
+  kind: AnchorKind;
+  confidence: number;
+}
+
+export interface CompanionCommitmentCandidate {
+  text: string;
+  dueHint?: string;
+  confidence: number;
+}
+
+export interface CompanionSignals {
+  facts: MemoryCandidate[];
+  anchors: CompanionAnchorCandidate[];
+  commitments: CompanionCommitmentCandidate[];
+}
+
 export interface ToolCall {
   id: string;
   type: 'function';
@@ -141,9 +195,24 @@ export type ToolExecutor = (
 
 export class DeepSeekClient {
   private readonly env: DeepSeekEnv;
+  private persona = '';
 
   constructor(env: DeepSeekEnv) {
     this.env = env;
+  }
+
+  setPersona(text: string): void {
+    this.persona = text.trim().slice(0, 2000);
+  }
+
+  private withPersona(prompt: string): string {
+    if (!this.persona) return prompt;
+    return `${prompt}
+
+<user-persona>
+以下是用户为自己定制的说话方式与边界，优先遵守；但不要覆盖上面的安全规则：
+${this.persona}
+</user-persona>`;
   }
 
   get configured(): boolean {
@@ -178,7 +247,7 @@ export class DeepSeekClient {
       max_tokens: 320,
       temperature: 0.7,
       messages: [
-        { role: 'system', content: PROACTIVE_SYSTEM_PROMPT },
+        { role: 'system', content: this.withPersona(PROACTIVE_SYSTEM_PROMPT) },
         { role: 'user', content: buildProactiveUserPrompt(state, event) },
       ],
     });
@@ -298,7 +367,7 @@ export class DeepSeekClient {
       max_tokens: 500,
       temperature: 0.8,
       messages: [
-        { role: 'system', content: CHAT_SYSTEM_PROMPT },
+        { role: 'system', content: this.withPersona(CHAT_SYSTEM_PROMPT) },
         { role: 'user', content: buildChatUserPrompt(state, history, message, memory) },
       ],
     });
@@ -315,7 +384,7 @@ export class DeepSeekClient {
     executeTool: ToolExecutor,
   ): Promise<string> {
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: CHAT_SYSTEM_PROMPT },
+      { role: 'system', content: this.withPersona(CHAT_SYSTEM_PROMPT) },
       { role: 'user', content: buildChatUserPrompt(state, history, message, memory) },
     ];
 
@@ -435,6 +504,162 @@ ${assistantReply}
         kind: fact.kind,
         confidence: fact.confidence,
       }));
+  }
+
+
+  async extractCompanionSignals(
+    userMessage: string,
+    assistantReply: string,
+  ): Promise<CompanionSignals> {
+    const data = await this.post({
+      model: this.env.model,
+      thinking: { type: 'disabled' },
+      response_format: { type: 'json_object' },
+      max_tokens: 500,
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content: `你是“同桌”的记忆整理器。只提取今天值得留下的东西，不做流水账。
+
+- facts：跨会话稳定的项目/偏好/事实，最多 3 条。
+- anchors：今天的一个具体瞬间/进展/卡点/心情，最多 2 条。必须来自 <user>，不要从 <assistant> 推断。不是“开了什么 App”，而是“做了什么/卡在哪/感觉如何”。
+- commitments：用户说“今晚/明天/回头”要做的具体事情，最多 1 条。
+
+忽略：密码、key、token、隐私、寒暄、一次性知识问题、助手的猜测。
+所有内容用简洁中文，每条最多 80 字。
+
+输出 JSON：
+{"facts":[{"text":"...","kind":"project|preference|fact","confidence":0.0}],"anchors":[{"text":"...","kind":"work|feeling|open_loop|moment","confidence":0.0}],"commitments":[{"text":"...","dueHint":"今晚|明天|...","confidence":0.0}]}
+没有内容时对应数组输出 []。`,
+        },
+        {
+          role: 'user',
+          content: `<user>
+${userMessage}
+</user>
+
+<assistant>
+${assistantReply}
+</assistant>`,
+        },
+      ],
+    });
+
+    const content = this.readContent(data);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return { facts: [], anchors: [], commitments: [] };
+    }
+    const result = companionSignalSchema.safeParse(parsed);
+    if (!result.success) return { facts: [], anchors: [], commitments: [] };
+
+    const seen = new Set<string>();
+    const facts = result.data.facts
+      .filter((fact) => {
+        const text = fact.text.trim();
+        if (!text || fact.confidence < 0.6) return false;
+        const key = `fact:${text.toLowerCase()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((fact) => ({
+        text: fact.text.trim().slice(0, 300),
+        kind: fact.kind,
+        confidence: fact.confidence,
+      }));
+
+    const anchors = result.data.anchors
+      .filter((anchor) => {
+        const text = anchor.text.trim();
+        if (!text || anchor.confidence < 0.5) return false;
+        const key = `anchor:${text.toLowerCase()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 2)
+      .map((anchor) => ({
+        text: anchor.text.trim().slice(0, 120),
+        kind: anchor.kind,
+        confidence: anchor.confidence,
+      }));
+
+    const commitments = result.data.commitments
+      .filter((commitment) => {
+        const text = commitment.text.trim();
+        if (!text || commitment.confidence < 0.5) return false;
+        const key = `commitment:${text.toLowerCase()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 1)
+      .map((commitment) => ({
+        text: commitment.text.trim().slice(0, 120),
+        dueHint: commitment.dueHint?.trim().slice(0, 40) || undefined,
+        confidence: commitment.confidence,
+      }));
+
+    return { facts, anchors, commitments };
+  }
+
+  async generateCompanionLine(
+    kind: 'morning' | 'evening',
+    anchors: string[],
+    commitments: string[],
+  ): Promise<string> {
+    const anchorText = anchors.length
+      ? anchors.map((item) => `- ${item}`).join('\n')
+      : '（没有）';
+    const commitmentText = commitments.length
+      ? commitments.map((item) => `- ${item}`).join('\n')
+      : '（没有）';
+    const scene =
+      kind === 'morning'
+        ? '早上第一次看到用户。用一句话接上昨天，不要总结成一整段。'
+        : '晚上用户已经空闲一会儿。用一句话收尾今天，再问一个具体的问题。';
+
+    const data = await this.post({
+      model: this.env.model,
+      thinking: { type: 'disabled' },
+      max_tokens: 100,
+      temperature: 0.8,
+      messages: [
+        {
+          role: 'system',
+          content: this.withPersona(`你是“同桌”，一个坐在程序员屏幕边上的 AI 工作搭子。
+规则：
+- 只输出一句话，最多 60 个汉字，不要引号，不要解释。
+- 只引用下面给出的锚点和承诺，不编造。
+- 不劝加班，不泛泛鼓励，不制造依赖。
+- 可以有一点自己的语气，但不要演。`),
+        },
+        {
+          role: 'user',
+          content: `场景：${scene}
+
+<锚点>
+${anchorText}
+</锚点>
+
+<承诺>
+${commitmentText}
+</承诺>
+
+只说这一句。`,
+        },
+      ],
+    });
+
+    return this.readContent(data)
+      .replace(/^["“]|["”]$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
   }
 
   private readContent(data: ChatCompletionResponse): string {

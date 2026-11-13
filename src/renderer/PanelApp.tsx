@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppStatus, ChatMessage, MemoryFact, MemoryKind } from '../shared/types';
+import type {
+  AnchorKind,
+  AppStatus,
+  ChatMessage,
+  CompanionToday,
+  MemoryFact,
+  MemoryKind,
+  SayVoice,
+} from '../shared/types';
 
 function now(): number {
   return Date.now();
@@ -52,6 +60,13 @@ const MEMORY_KIND_LABEL: Record<MemoryKind, string> = {
   fact: '事实',
 };
 
+const ANCHOR_KIND_LABEL: Record<AnchorKind, string> = {
+  work: '在做',
+  feeling: '心情',
+  open_loop: '没完成',
+  moment: '瞬间',
+};
+
 function formatClock(value?: number): string {
   if (!value) return '未扫描';
   return new Date(value).toLocaleTimeString('zh-CN', {
@@ -68,6 +83,25 @@ export default function PanelApp() {
   const [source, setSource] = useState<'deepseek' | 'mock' | 'cache' | 'local' | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryBusy, setMemoryBusy] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(false);
+  const [companion, setCompanion] = useState<CompanionToday | null>(null);
+  const [companionBusy, setCompanionBusy] = useState(false);
+  const [companionError, setCompanionError] = useState('');
+  const [newAnchor, setNewAnchor] = useState('');
+  const [newAnchorKind, setNewAnchorKind] = useState<AnchorKind>('work');
+  const [newCommitment, setNewCommitment] = useState('');
+  const [editingAnchorId, setEditingAnchorId] = useState<string | null>(null);
+  const [anchorEditText, setAnchorEditText] = useState('');
+  const [anchorEditKind, setAnchorEditKind] = useState<AnchorKind>('work');
+  const [voiceOptions, setVoiceOptions] = useState<SayVoice[]>([]);
+  const [voiceDraft, setVoiceDraft] = useState('Tingting');
+  const [rateDraft, setRateDraft] = useState(180);
+  const [personaDraft, setPersonaDraft] = useState('');
+  const [quietDraftEnabled, setQuietDraftEnabled] = useState(false);
+  const [quietStartDraft, setQuietStartDraft] = useState('23:30');
+  const [quietEndDraft, setQuietEndDraft] = useState('08:00');
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [exportPath, setExportPath] = useState('');
   const [facts, setFacts] = useState<MemoryFact[]>([]);
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryFilter, setMemoryFilter] = useState<'all' | MemoryKind | 'pinned'>('all');
@@ -80,6 +114,7 @@ export default function PanelApp() {
   const [editKind, setEditKind] = useState<MemoryKind>('fact');
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const anchorInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void window.deskmate.getStatus().then(setStatus).catch(console.error);
@@ -119,6 +154,36 @@ export default function PanelApp() {
     if (!memoryOpen) return;
     void window.deskmate.getMemoryFacts().then(setFacts).catch(console.error);
   }, [memoryOpen, status?.memoryCount]);
+
+  useEffect(() => {
+    if (!companionOpen) return;
+    void loadCompanion();
+  }, [companionOpen]);
+
+  useEffect(() => {
+    void loadCompanion();
+    const timer = window.setInterval(() => void loadCompanion(true), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    return window.deskmate.onOpenCompanion(() => {
+      setCompanionOpen(true);
+      void loadCompanion();
+      window.setTimeout(() => anchorInputRef.current?.focus(), 120);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!settingsOpen || !status) return;
+    setVoiceDraft(status.voiceName || 'Tingting');
+    setRateDraft(status.speechRate || 180);
+    setPersonaDraft(status.persona || '');
+    setQuietDraftEnabled(Boolean(status.quietHoursEnabled));
+    setQuietStartDraft(status.quietStart || '23:30');
+    setQuietEndDraft(status.quietEnd || '08:00');
+    void window.deskmate.getVoiceOptions().then(setVoiceOptions).catch(console.error);
+  }, [settingsOpen]);
 
   useEffect(() => {
     if (!status) return;
@@ -244,24 +309,40 @@ export default function PanelApp() {
   async function openSettings() {
     if (!status) return;
     setExcludedDraft(status.excludedApps.join('\n'));
+    setVoiceDraft(status.voiceName || 'Tingting');
+    setRateDraft(status.speechRate || 180);
+    setPersonaDraft(status.persona || '');
+    setQuietDraftEnabled(Boolean(status.quietHoursEnabled));
+    setQuietStartDraft(status.quietStart || '23:30');
+    setQuietEndDraft(status.quietEnd || '08:00');
     setSettingsOpen(true);
   }
 
-  async function savePrivacySettings() {
-    if (!status) return;
+  async function saveSettings() {
+    if (!status || settingsBusy) return;
     const apps = excludedDraft
       .split(/[\n,，]+/)
       .map((item) => item.trim())
       .filter(Boolean);
+    setSettingsBusy(true);
     try {
-      const next = await window.deskmate.setPrivacySettings(apps);
+      let next = await window.deskmate.setPrivacySettings(apps);
+      next = await window.deskmate.setVoiceSettings(voiceDraft, rateDraft);
+      next = await window.deskmate.setPersona(personaDraft);
+      next = await window.deskmate.setQuietHours(
+        quietDraftEnabled,
+        quietStartDraft,
+        quietEndDraft,
+      );
       setStatus(next);
       setSettingsOpen(false);
     } catch (error) {
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', text: `保存隐私设置失败：${String(error)}`, at: now() },
+        { role: 'assistant', text: `保存设置失败：${String(error)}`, at: now() },
       ]);
+    } finally {
+      setSettingsBusy(false);
     }
   }
 
@@ -294,6 +375,119 @@ export default function PanelApp() {
       ]);
     } finally {
       setMemoryBusy(false);
+    }
+  }
+
+  async function loadCompanion(silent = false) {
+    if (!silent) {
+      setCompanionBusy(true);
+      setCompanionError('');
+    }
+    try {
+      setCompanion(await window.deskmate.getCompanionToday());
+    } catch (error) {
+      if (!silent) setCompanionError(`读取今天失败：${String(error)}`);
+    } finally {
+      if (!silent) setCompanionBusy(false);
+    }
+  }
+
+  async function openCompanion() {
+    setCompanionOpen(true);
+    await loadCompanion();
+    window.setTimeout(() => anchorInputRef.current?.focus(), 120);
+  }
+
+  async function addAnchor() {
+    const text = newAnchor.trim();
+    if (!text || companionBusy) return;
+    setCompanionBusy(true);
+    setCompanionError('');
+    try {
+      setCompanion(await window.deskmate.addAnchor(text, newAnchorKind));
+      setNewAnchor('');
+    } catch (error) {
+      setCompanionError(`添加锚点失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  function startAnchorEdit(anchor: CompanionToday['anchors'][number]) {
+    setEditingAnchorId(anchor.id);
+    setAnchorEditText(anchor.text);
+    setAnchorEditKind(anchor.kind);
+  }
+
+  async function saveAnchorEdit() {
+    if (!editingAnchorId || !anchorEditText.trim() || companionBusy) return;
+    setCompanionBusy(true);
+    setCompanionError('');
+    try {
+      setCompanion(
+        await window.deskmate.updateAnchor(
+          editingAnchorId,
+          anchorEditText.trim(),
+          anchorEditKind,
+        ),
+      );
+      setEditingAnchorId(null);
+      setAnchorEditText('');
+    } catch (error) {
+      setCompanionError(`编辑锚点失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function deleteAnchor(id: string) {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      setCompanion(await window.deskmate.deleteAnchor(id));
+    } catch (error) {
+      setCompanionError(`删除锚点失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function addCommitment() {
+    const text = newCommitment.trim();
+    if (!text || companionBusy) return;
+    setCompanionBusy(true);
+    setCompanionError('');
+    try {
+      setCompanion(await window.deskmate.addCommitment(text));
+      setNewCommitment('');
+    } catch (error) {
+      setCompanionError(`添加承诺失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function completeCommitment(id: string, done: boolean) {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      setCompanion(await window.deskmate.completeCommitment(id, done));
+    } catch (error) {
+      setCompanionError(`更新承诺失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function deleteCommitment(id: string) {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      setCompanion(await window.deskmate.deleteCommitment(id));
+    } catch (error) {
+      setCompanionError(`删除承诺失败：${String(error)}`);
+    } finally {
+      setCompanionBusy(false);
     }
   }
 
@@ -387,6 +581,15 @@ export default function PanelApp() {
         ...prev,
         { role: 'assistant', text: `切换自动记忆失败：${String(error)}`, at: now() },
       ]);
+    }
+  }
+
+  async function exportMemory() {
+    try {
+      const file = await window.deskmate.exportMemory();
+      setExportPath(file ? `已导出：${file}` : '已取消导出');
+    } catch (error) {
+      setExportPath(`导出失败：${String(error)}`);
     }
   }
 
@@ -517,6 +720,8 @@ export default function PanelApp() {
         ? '前台窗口'
         : '';
   const scanStats = status?.scanStats ?? { total: 0, analyzed: 0 };
+  const openCommitmentCount =
+    companion?.commitments.filter((item) => item.status === 'open').length ?? 0;
   const memoryFilters = [
     { key: 'all' as const, label: '全部', count: filterCounts.all },
     { key: 'project' as const, label: '项目', count: filterCounts.project },
@@ -605,21 +810,22 @@ export default function PanelApp() {
             </div>
           </div>
 
-          <div className="context-insight" title={state?.evidence?.join('\n') || undefined}>
-            {captureLabel && <span className="capture-chip">{captureLabel}</span>}
-            {noForeground && <span className="stale-text">未读前台应用</span>}
-            <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
-            <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
-            {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}
-            {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
-            <span>
-              扫描 {scanStats.total} 次 · 分析 {scanStats.analyzed} 次
-            </span>
-            <span>
-              视觉 {status?.visionCallsThisHour ?? 0} 次/小时
-            </span>
-            {stateStale && <span className="stale-text">状态可能过期</span>}
-          </div>
+          <details className="context-insight diagnostics" title={state?.evidence?.join('\n') || undefined}>
+            <summary>诊断</summary>
+            <div className="diagnostics-grid">
+              {captureLabel && <span className="capture-chip">{captureLabel}</span>}
+              {noForeground && <span className="stale-text">未读前台应用</span>}
+              <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
+              <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
+              {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}
+              {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
+              <span>
+                扫描 {scanStats.total} 次 · 分析 {scanStats.analyzed} 次
+              </span>
+              <span>视觉 {status?.visionCallsThisHour ?? 0} 次/小时</span>
+              {stateStale && <span className="stale-text">状态可能过期</span>}
+            </div>
+          </details>
 
           <div className="context-foot">
             <span className="context-api" title={status?.apiMessage}>
@@ -627,6 +833,43 @@ export default function PanelApp() {
               {status?.apiMessage ?? '读取中…'}
             </span>
             <span>{screenLabel}</span>
+          </div>
+        </section>
+
+        <section className="card today-card">
+          <div className="today-head">
+            <div>
+              <span className="eyebrow">今天</span>
+              <p className="today-sub">只记值得记的瞬间，不做流水账。</p>
+            </div>
+            <button className="text-button" onClick={() => void openCompanion()}>
+              记一下
+            </button>
+          </div>
+
+          <div className="today-list">
+            {companion?.anchors.length ? (
+              companion.anchors.slice(0, 3).map((anchor) => (
+                <div className="today-item" key={anchor.id}>
+                  <span className={`memory-kind ${anchor.kind}`}>
+                    {ANCHOR_KIND_LABEL[anchor.kind]}
+                  </span>
+                  <span className="today-text">{anchor.text}</span>
+                  <time>{formatClock(anchor.at)}</time>
+                </div>
+              ))
+            ) : (
+              <p className="muted">
+                今天还没有锚点。点“记一下”，或跟我说说今天做了什么。
+              </p>
+            )}
+          </div>
+
+          <div className="today-foot">
+            <span>{openCommitmentCount} 件答应的事</span>
+            <button className="text-button" onClick={() => void openCompanion()}>
+              查看今天
+            </button>
           </div>
         </section>
 
@@ -664,6 +907,10 @@ export default function PanelApp() {
             <button className="toggle" onClick={() => void openMemory()}>
               <span className="toggle-dot" />
               记忆 <b>{status?.memoryCount ?? 0}</b>
+            </button>
+            <button className="toggle" onClick={() => void openCompanion()}>
+              <span className="toggle-dot" />
+              今天 <b>{companion?.anchors.length ?? 0}</b>
             </button>
             <button className={`toggle ${voiceOn ? 'on' : ''}`} onClick={() => void toggleVoice()}>
               <span className="toggle-dot" />
@@ -768,8 +1015,8 @@ export default function PanelApp() {
             <div className="sheet-handle" />
             <div className="sheet-head">
               <div>
-                <h2>隐私设置</h2>
-                <p>这些设置只影响后续自动扫描，不会主动弹出面板。</p>
+                <h2>设置</h2>
+                <p>只影响主动说话和感知，不会主动弹出面板。</p>
               </div>
               <button className="icon-button" onClick={() => setSettingsOpen(false)} title="关闭">
                 ×
@@ -788,16 +1035,349 @@ export default function PanelApp() {
               />
             </div>
 
+            <div className="settings-section">
+              <label htmlFor="voice-name">陪伴声音</label>
+              <p>音色来自 macOS `say`，语速 120–260。可以先用“测试”听一句。</p>
+              <div className="settings-row">
+                <select
+                  id="voice-name"
+                  value={voiceDraft}
+                  onChange={(event) => setVoiceDraft(event.target.value)}
+                  disabled={settingsBusy}
+                >
+                  {voiceOptions.length === 0 && <option value="Tingting">Tingting</option>}
+                  {voiceOptions.map((voice) => (
+                    <option key={voice.name} value={voice.name}>
+                      {voice.name} · {voice.locale}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="range"
+                  min={120}
+                  max={260}
+                  step={10}
+                  value={rateDraft}
+                  onChange={(event) => setRateDraft(Number(event.target.value))}
+                  disabled={settingsBusy}
+                  aria-label="语速"
+                />
+                <span className="settings-value">{rateDraft}</span>
+                <button
+                  className="text-button"
+                  disabled={settingsBusy}
+                  onClick={() =>
+                    void window.deskmate.setVoiceSettings(voiceDraft, rateDraft).then((next) => {
+                      setStatus(next);
+                      window.deskmate.chat('用现在的音色说一句“我在”。', []).catch(console.error);
+                    })
+                  }
+                >
+                  测试
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <label htmlFor="persona">人格 / 说话方式</label>
+              <p>写称呼、语气、边界、绝对不说。留空用默认同桌人格。</p>
+              <textarea
+                id="persona"
+                value={personaDraft}
+                onChange={(event) => setPersonaDraft(event.target.value)}
+                rows={4}
+                placeholder={'叫我老杨。说话短一点，别用“加油”。\n不确定的时候直接说不知道。'}
+                disabled={settingsBusy}
+              />
+            </div>
+
+            <div className="settings-section">
+              <label>安静时段</label>
+              <p>这段时间不主动说话；手动聊天和“记一下”不受影响。</p>
+              <div className="settings-row">
+                <button
+                  className={`toggle ${quietDraftEnabled ? 'on' : ''}`}
+                  onClick={() => setQuietDraftEnabled((value) => !value)}
+                  aria-pressed={quietDraftEnabled}
+                  disabled={settingsBusy}
+                >
+                  <span className="toggle-dot" />
+                  安静时段 <b>{quietDraftEnabled ? '开' : '关'}</b>
+                </button>
+                <input
+                  type="time"
+                  value={quietStartDraft}
+                  onChange={(event) => setQuietStartDraft(event.target.value)}
+                  disabled={settingsBusy || !quietDraftEnabled}
+                  aria-label="安静时段开始"
+                />
+                <span className="settings-value">→</span>
+                <input
+                  type="time"
+                  value={quietEndDraft}
+                  onChange={(event) => setQuietEndDraft(event.target.value)}
+                  disabled={settingsBusy || !quietDraftEnabled}
+                  aria-label="安静时段结束"
+                />
+              </div>
+            </div>
+
             <div className="settings-note">
-              每次扫描都会调用视觉模型和主动判断，不再按视觉预算限流。暂停感知、勿扰和语音开关仍在主面板操作。
+              普通观察默认安静：同一活动 10 分钟内不重复，活动变化至少隔 3 分钟；全屏和会议中不主动说话。暂停感知、勿扰和语音开关仍在主面板操作。
             </div>
 
             <div className="settings-actions">
               <button className="text-button" onClick={() => setSettingsOpen(false)}>
                 取消
               </button>
-              <button className="memory-add" onClick={() => void savePrivacySettings()}>
+              <button
+                className="memory-add"
+                onClick={() => void saveSettings()}
+                disabled={settingsBusy}
+              >
                 保存设置
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {companionOpen && (
+        <div className="sheet-backdrop" onClick={() => setCompanionOpen(false)}>
+          <section className="memory-sheet companion-sheet" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-handle" />
+            <div className="sheet-head">
+              <div>
+                <h2>今天</h2>
+                <p>{companion?.day ?? '读取中'} · 只记 2–3 个锚点，不做流水账。</p>
+              </div>
+              <button
+                className="icon-button"
+                onClick={() => setCompanionOpen(false)}
+                title="关闭"
+              >
+                ×
+              </button>
+            </div>
+
+            {companionError && <div className="settings-note">{companionError}</div>}
+
+            <div className="companion-section">
+              <div className="companion-section-head">
+                <span>今天的锚点</span>
+                <b>{companion?.anchors.length ?? 0}</b>
+              </div>
+              <div className="memory-list">
+                {companion?.anchors.length ? (
+                  companion.anchors.map((anchor) => (
+                    <article className="memory-item" key={anchor.id}>
+                      <div className="memory-main">
+                        <div className="memory-meta">
+                          <span className={`memory-kind ${anchor.kind}`}>
+                            {ANCHOR_KIND_LABEL[anchor.kind]}
+                          </span>
+                          <span className="memory-source auto">
+                            {anchor.source === 'explicit' ? '手动' : '自动'}
+                          </span>
+                          <time>{formatClock(anchor.at)}</time>
+                        </div>
+                        {editingAnchorId === anchor.id ? (
+                          <div className="memory-edit">
+                            <select
+                              value={anchorEditKind}
+                              onChange={(event) =>
+                                setAnchorEditKind(event.target.value as AnchorKind)
+                              }
+                              disabled={companionBusy}
+                            >
+                              <option value="work">在做</option>
+                              <option value="feeling">心情</option>
+                              <option value="open_loop">没完成</option>
+                              <option value="moment">瞬间</option>
+                            </select>
+                            <input
+                              value={anchorEditText}
+                              onChange={(event) => setAnchorEditText(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  void saveAnchorEdit();
+                                }
+                                if (event.key === 'Escape') {
+                                  setEditingAnchorId(null);
+                                }
+                              }}
+                              disabled={companionBusy}
+                            />
+                            <div className="memory-edit-actions">
+                              <button className="text-button" onClick={() => setEditingAnchorId(null)}>
+                                取消
+                              </button>
+                              <button
+                                className="memory-add"
+                                onClick={() => void saveAnchorEdit()}
+                                disabled={companionBusy || !anchorEditText.trim()}
+                              >
+                                保存
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p>{anchor.text}</p>
+                        )}
+                      </div>
+                      <div className="memory-actions">
+                        <button
+                          className="memory-edit-button"
+                          onClick={() => startAnchorEdit(anchor)}
+                          title="编辑这个锚点"
+                          disabled={companionBusy}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          className="memory-delete"
+                          onClick={() => void deleteAnchor(anchor.id)}
+                          title="删除这个锚点"
+                          disabled={companionBusy}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="memory-empty">
+                    今天还没有锚点。
+                    <br />
+                    记一个具体的瞬间，不用写流水账。
+                  </div>
+                )}
+              </div>
+
+              <div className="memory-compose">
+                <select
+                  value={newAnchorKind}
+                  onChange={(event) => setNewAnchorKind(event.target.value as AnchorKind)}
+                  disabled={companionBusy}
+                  aria-label="锚点类型"
+                >
+                  <option value="work">在做</option>
+                  <option value="feeling">心情</option>
+                  <option value="open_loop">没完成</option>
+                  <option value="moment">瞬间</option>
+                </select>
+                <input
+                  ref={anchorInputRef}
+                  value={newAnchor}
+                  onChange={(event) => setNewAnchor(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void addAnchor();
+                    }
+                  }}
+                  placeholder="比如：下午把 auth 的 race 修好了…"
+                  disabled={companionBusy}
+                />
+                <button
+                  className="memory-add"
+                  onClick={() => void addAnchor()}
+                  disabled={companionBusy || !newAnchor.trim()}
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+
+            <div className="companion-section">
+              <div className="companion-section-head">
+                <span>答应过的事</span>
+                <b>{openCommitmentCount}</b>
+              </div>
+              <div className="memory-list">
+                {companion?.commitments.length ? (
+                  companion.commitments.map((commitment) => (
+                    <article
+                      className={`memory-item ${commitment.status === 'done' ? 'done' : ''}`}
+                      key={commitment.id}
+                    >
+                      <div className="memory-main">
+                        <div className="memory-meta">
+                          <span className={`memory-kind ${commitment.status === 'done' ? 'fact' : 'preference'}`}>
+                            {commitment.status === 'done' ? '完成' : '答应'}
+                          </span>
+                          {commitment.dueHint && (
+                            <span className="memory-source auto">{commitment.dueHint}</span>
+                          )}
+                          <time>{new Date(commitment.at).toLocaleDateString('zh-CN')}</time>
+                        </div>
+                        <p>{commitment.text}</p>
+                      </div>
+                      <div className="memory-actions">
+                        <button
+                          className={`memory-pin ${commitment.status === 'done' ? 'on' : ''}`}
+                          onClick={() =>
+                            void completeCommitment(commitment.id, commitment.status !== 'done')
+                          }
+                          title={commitment.status === 'done' ? '标为未完成' : '标为完成'}
+                          disabled={companionBusy}
+                        >
+                          {commitment.status === 'done' ? '✓' : '○'}
+                        </button>
+                        <button
+                          className="memory-delete"
+                          onClick={() => void deleteCommitment(commitment.id)}
+                          title="删除这条承诺"
+                          disabled={companionBusy}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="memory-empty">
+                    还没有答应过的事。
+                    <br />
+                    说一句“今晚把数字发他”，我会记着。
+                  </div>
+                )}
+              </div>
+
+              <div className="memory-compose">
+                <input
+                  value={newCommitment}
+                  onChange={(event) => setNewCommitment(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void addCommitment();
+                    }
+                  }}
+                  placeholder="今晚/明天要做什么…"
+                  disabled={companionBusy}
+                />
+                <button
+                  className="memory-add"
+                  onClick={() => void addCommitment()}
+                  disabled={companionBusy || !newCommitment.trim()}
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+
+            {companion?.recapText && (
+              <div className="settings-note">今晚的一句：{companion.recapText}</div>
+            )}
+
+            <div className="sheet-foot">
+              <span>
+                {companion?.anchors.length ?? 0} 个锚点 · {openCommitmentCount} 件未完成
+              </span>
+              <button className="text-button" onClick={() => setCompanionOpen(false)}>
+                关闭
               </button>
             </div>
           </section>
@@ -1002,14 +1582,19 @@ export default function PanelApp() {
             </div>
 
             <div className="sheet-foot">
-              <span>{facts.length} 条记忆</span>
-              <button
-                className="text-button danger"
-                onClick={() => void clearMemory()}
-                disabled={memoryBusy || facts.length === 0}
-              >
-                清空全部
-              </button>
+              <span>{exportPath || `${facts.length} 条记忆`}</span>
+              <div className="memory-footer-actions">
+                <button className="text-button" onClick={() => void exportMemory()}>
+                  导出
+                </button>
+                <button
+                  className="text-button danger"
+                  onClick={() => void clearMemory()}
+                  disabled={memoryBusy || facts.length === 0}
+                >
+                  清空全部
+                </button>
+              </div>
             </div>
           </section>
         </div>

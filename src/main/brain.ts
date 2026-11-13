@@ -2,13 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
 import type {
+  AnchorKind,
   ApiStatus,
   AppStatus,
   AvatarConfig,
   ChatMessage,
   ChatReply,
+  BubbleFeedbackAction,
+  Commitment,
+  CompanionToday,
+  DailyAnchor,
   DemoState,
   Inspection,
+  MemoryExport,
   MemoryFact,
   MemoryKind,
   ScanResult,
@@ -17,7 +23,24 @@ import type {
   UtterancePlan,
 } from '../shared/types';
 import { AGENT_TOOLS } from './agentTools';
-import { DeepSeekClient, DeepSeekError } from './deepseek';
+import {
+  buildEveningFallback,
+  buildMorningFallback,
+  extractLocalSignals,
+  isEveningWindow,
+  isMorningWindow,
+  isQuietHours,
+  localDay,
+  previousDay,
+  recapDayFor,
+} from './companion';
+import {
+  DeepSeekClient,
+  DeepSeekError,
+  type CompanionAnchorCandidate,
+  type CompanionCommitmentCandidate,
+  type MemoryCandidate,
+} from './deepseek';
 import { getDeepSeekEnv } from './env';
 import { MemoryStore } from './memory';
 import { MockBrain } from './mockBrain';
@@ -35,6 +58,32 @@ import {
 import { speakWithSay } from './tts';
 
 const SPEECH_COOLDOWN_MS = 2 * 60_000;
+
+const MEETING_APPS = [
+  'zoom',
+  'microsoft teams',
+  'teams',
+  'google meet',
+  'meet.google',
+  'tencent meeting',
+  '腾讯会议',
+  '飞书会议',
+  'webex',
+  'whereby',
+  'around',
+];
+
+const MEETING_TITLE_PATTERNS =
+  /(zoom meeting|google meet|microsoft teams|teams meeting|tencent meeting|webex meeting|腾讯会议|飞书会议)/;
+
+type CompanionMomentKind = 'morning' | 'evening';
+
+interface CompanionMoment {
+  text: string;
+  kind: CompanionMomentKind;
+  day: string;
+  source: 'deepseek' | 'mock';
+}
 
 const INITIAL_STATE: DemoState = {
   testResult: 'none',
@@ -83,6 +132,8 @@ export class BrainService {
   private lastFocusMilestone = 0;
   private lastIdleNudgeAt = 0;
   private lastIdleSec = 0;
+  private lastObservationAt = 0;
+  private lastObservationKey = '';
   private lastUserAskedToRemember = false;
   private lastAnalyzedAt = 0;
   private scanStats = { total: 0, analyzed: 0 };
@@ -91,6 +142,7 @@ export class BrainService {
   private visionCallsThisHour = 0;
 
   constructor() {
+    this.client.setPersona(this.memory.getSettings().persona);
     if (this.client.configured) {
       this.apiStatus = 'unchecked';
       this.apiMessage = '已配置 DeepSeek key，点击“测试连接”验证';
@@ -101,6 +153,7 @@ export class BrainService {
   }
 
   getStatus(): AppStatus {
+    const settings = this.memory.getSettings();
     return {
       apiStatus: this.apiStatus,
       apiMessage: this.apiMessage,
@@ -110,15 +163,21 @@ export class BrainService {
       platform: process.platform,
       voice:
         process.platform === 'darwin'
-          ? 'macOS say（Tingting）'
+          ? `macOS say（${settings.voiceName}）`
           : '未接语音（当前平台不是 macOS）',
-      voiceEnabled: this.memory.getSettings().voiceEnabled,
+      voiceEnabled: settings.voiceEnabled,
+      voiceName: settings.voiceName,
+      speechRate: settings.speechRate,
+      persona: settings.persona,
+      quietHoursEnabled: settings.quietHoursEnabled,
+      quietStart: settings.quietStart,
+      quietEnd: settings.quietEnd,
       screenStatus: getScreenStatus(),
-      dnd: this.memory.getSettings().dnd,
+      dnd: settings.dnd,
       memoryCount: this.memory.getFactCount(),
-      autoMemory: this.memory.getSettings().autoMemory,
-      perceptionPausedUntil: this.memory.getSettings().perceptionPausedUntil,
-      excludedApps: this.memory.getSettings().excludedApps,
+      autoMemory: settings.autoMemory,
+      perceptionPausedUntil: settings.perceptionPausedUntil,
+      excludedApps: settings.excludedApps,
       visionCallsThisHour: this.visionCallsThisHour,
       scanStats: { ...this.scanStats },
       state: { ...this.state },
@@ -131,6 +190,85 @@ export class BrainService {
 
   getMemoryFacts(): MemoryFact[] {
     return this.memory.getFacts(100);
+  }
+
+  getCompanionToday(): CompanionToday {
+    return this.memory.getCompanionToday();
+  }
+
+  addAnchor(text: string, kind: AnchorKind = 'work'): CompanionToday {
+    this.memory.addAnchor(text, kind, { source: 'explicit', confidence: 1 });
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  deleteAnchor(id: string): CompanionToday {
+    this.memory.deleteAnchor(id);
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  addCommitment(text: string, dueHint?: string): CompanionToday {
+    this.memory.addCommitment(text, dueHint);
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  completeCommitment(id: string, done = true): CompanionToday {
+    this.memory.completeCommitment(id, done);
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  deleteCommitment(id: string): CompanionToday {
+    this.memory.deleteCommitment(id);
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  updateAnchor(id: string, text: string, kind: AnchorKind): CompanionToday {
+    this.memory.updateAnchor(id, text, kind);
+    this.emit();
+    return this.getCompanionToday();
+  }
+
+  recordBubbleFeedback(eventType: string, action: BubbleFeedbackAction): void {
+    this.memory.recordBubbleFeedback(eventType, action);
+  }
+
+  exportMemory(): MemoryExport {
+    return this.memory.exportData();
+  }
+
+  speak(text: string): number {
+    const settings = this.memory.getSettings();
+    return speakWithSay(text, {
+      voice: settings.voiceName,
+      rate: settings.speechRate,
+    });
+  }
+
+  setVoiceSettings(voiceName: string, speechRate: number): AppStatus {
+    this.memory.updateSettings({ voiceName, speechRate });
+    this.emit();
+    return this.getStatus();
+  }
+
+  setPersona(text: string): AppStatus {
+    this.memory.updateSettings({ persona: text });
+    this.client.setPersona(text);
+    this.emit();
+    return this.getStatus();
+  }
+
+  setQuietHours(enabled: boolean, start: string, end: string): AppStatus {
+    this.memory.updateSettings({
+      quietHoursEnabled: enabled,
+      quietStart: start,
+      quietEnd: end,
+    });
+    this.emit();
+    return this.getStatus();
   }
 
   addMemory(text: string, kind?: MemoryFact['kind']): AppStatus {
@@ -220,6 +358,8 @@ export class BrainService {
     this.lastFocusMilestone = 0;
     this.lastIdleNudgeAt = 0;
     this.lastIdleSec = 0;
+    this.lastObservationAt = 0;
+    this.lastObservationKey = '';
     this.emit();
     return this.getStatus();
   }
@@ -343,6 +483,8 @@ export class BrainService {
     const screenStatus = getScreenStatus();
     const active = await readActiveWindow();
     const idleSec = getIdleSeconds();
+    const previousIdleSec = this.lastIdleSec;
+    this.lastIdleSec = idleSec;
 
     if (active && this.isAppExcluded(active.app)) {
       this.state = {
@@ -501,41 +643,84 @@ export class BrainService {
       focusMin: this.nextFocusMin(idleSec, analyzedAt, captured.app || inspection.app),
     };
 
+    this.maybeAutoAnchors(previousTest, nextTest, analyzedAt);
+
     let planPayload: UtterancePayload | null = null;
     let event: string | null = null;
     const dnd = this.memory.getSettings().dnd;
+    const quiet = this.isQuietContext(now, active, display);
+    let companionMoment: CompanionMoment | null = null;
 
-    if (!dnd && previousTest === 'fail' && nextTest === 'pass') {
+    if (!dnd && !quiet && previousTest === 'fail' && nextTest === 'pass') {
       event = `test-pass: 截图显示测试从失败变为通过（${this.state.activity}）`;
-    } else if (allowProactive && !dnd) {
-      event = this.buildObservationEvent(idleSec, now);
+    } else if (allowProactive && !dnd && !quiet) {
+      // buildObservationEvent 有副作用（更新 idle/focus 状态），先调用再决定是否让位给陪伴时刻。
+      // 陪伴时刻优先于普通观察：早上接昨天、晚上收尾，都是一天一次。
+      const observation = this.buildObservationEvent(idleSec, now, previousIdleSec);
+      companionMoment = await this.maybeCompanionMoment(now, idleSec);
+      if (!companionMoment) event = observation;
     }
 
-    if (event) {
-      // 每次扫描都把“此刻要不要说话”交给 LLM，不再用长冷却/大事门槛限制。
-      const generated = await this.generatePlan(event);
-      const plan = this.ensureAudible(event, generated.plan);
+    if (companionMoment) {
+      const plan = this.makeCompanionPlan(companionMoment.text, companionMoment.kind);
+      const eventType = `companion:${companionMoment.kind}`;
       const canSpeak = Date.now() - this.lastSpokenAt >= SPEECH_COOLDOWN_MS;
+      const muted = this.memory.isEventMuted(eventType);
       console.info(
-        `[proactive] ${event.split(':')[0]} ${plan.say ? (canSpeak ? 'speak' : 'cooldown') : 'silent'}`,
+        `[companion] ${companionMoment.kind} ${muted ? 'muted' : canSpeak ? 'speak' : 'cooldown'}`,
       );
 
-      if (plan.say && canSpeak) {
-        const speakingMs = this.isVoiceEnabled() ? speakWithSay(plan.speechText) : 0;
+      if (canSpeak && !muted) {
+        const speakingMs = this.isVoiceEnabled() ? this.speak(plan.speechText) : 0;
         planPayload = {
           plan,
           state: { ...this.state },
           speakingMs,
-          source: generated.source,
+          source: companionMoment.source,
           origin: 'proactive',
+          eventType,
         };
         this.lastSpokenAt = Date.now();
         this.lastSpokenText = plan.displayText;
-        if (event.startsWith('idle:')) this.lastIdleNudgeAt = now;
-        else if (event.startsWith('focus-milestone:')) {
-          this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+        if (companionMoment.kind === 'morning') {
+          this.memory.markCallback(companionMoment.day);
+        } else {
+          this.memory.markRecap(companionMoment.day, plan.displayText);
         }
         this.memory.appendMessage('assistant', plan.displayText);
+      }
+    } else if (event) {
+      const eventType = event.split(':')[0];
+      // 测试红绿是低频高价值事件，不参与“同类降频”。
+      const muted = eventType !== 'test-pass' && this.memory.isEventMuted(eventType);
+      if (muted) {
+        console.info(`[proactive] ${eventType} muted`);
+      } else {
+        const generated = await this.generatePlan(event);
+        const plan = this.ensureAudible(event, generated.plan);
+        const canSpeak = Date.now() - this.lastSpokenAt >= SPEECH_COOLDOWN_MS;
+        console.info(
+          `[proactive] ${eventType} ${plan.say ? (canSpeak ? 'speak' : 'cooldown') : 'silent'}`,
+        );
+
+        if (plan.say && canSpeak) {
+          const speakingMs = this.isVoiceEnabled() ? this.speak(plan.speechText) : 0;
+          planPayload = {
+            plan,
+            state: { ...this.state },
+            speakingMs,
+            source: generated.source,
+            origin: 'proactive',
+            eventType,
+          };
+          this.lastSpokenAt = Date.now();
+          this.lastSpokenText = plan.displayText;
+          if (event.startsWith('idle:')) this.lastIdleNudgeAt = now;
+          else if (event.startsWith('focus-milestone:')) {
+            this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+          }
+          this.memory.appendMessage('assistant', plan.displayText);
+        }
       }
     }
 
@@ -559,10 +744,11 @@ export class BrainService {
     };
   }
 
-  private buildObservationEvent(idleSec: number, now: number): string | null {
-    const wasIdle = this.lastIdleSec;
-    this.lastIdleSec = idleSec;
-
+  private buildObservationEvent(
+    idleSec: number,
+    now: number,
+    wasIdle: number,
+  ): string | null {
     // 离开 10 分钟以上再回来，先打个招呼。
     if (wasIdle >= 600 && idleSec < 60) {
       return `return: 用户离开 ${Math.round(wasIdle / 60)} 分钟后回来了`;
@@ -585,10 +771,197 @@ export class BrainService {
     const activity = this.state.activity?.trim();
     if (!activity || activity === INITIAL_STATE.activity) return null;
 
+    // 普通观察默认安静：同一活动 10 分钟内不重复，活动刚变化也至少隔 3 分钟。
+    const key = `${this.state.app ?? ''}|${this.state.windowTitle ?? ''}|${activity.slice(0, 40)}`;
+    const gap = now - this.lastObservationAt;
+    if (key === this.lastObservationKey && gap < 10 * 60_000) return null;
+    if (key !== this.lastObservationKey && gap < 3 * 60_000) return null;
+    this.lastObservationAt = now;
+    this.lastObservationKey = key;
+
     const previous = this.lastSpokenText
       ? `\n上一句你刚说过：「${this.lastSpokenText.slice(0, 60)}」，不要重复。`
       : '';
     return `observe: 用户正在「${activity.slice(0, 80)}」${previous}`;
+  }
+
+  private maybeAutoAnchors(
+    previousTest: TestResult,
+    nextTest: TestResult,
+    now: number,
+  ): void {
+    const day = localDay(new Date(now));
+    if (this.memory.countAutoAnchors(day) >= 2) return;
+
+    const activity = (
+      this.state.activity?.trim() ||
+      this.state.windowTitle?.trim() ||
+      this.state.app?.trim() ||
+      ''
+    ).slice(0, 80);
+    if (!activity) return;
+    if (/等待第一次扫描|暂时看不清|屏幕已锁定|已跳过隐私/.test(activity)) return;
+
+    if (previousTest === 'fail' && nextTest === 'pass') {
+      this.addAutoAnchor(`测试红转绿：${activity}`, 'work', 'test-pass', day, now);
+    }
+    if (nextTest === 'fail' && this.state.focusMin >= 30) {
+      this.addAutoAnchor(`测试还红着：${activity}`, 'open_loop', 'stuck-30', day, now);
+    }
+    if (this.state.focusMin >= 90) {
+      this.addAutoAnchor(`连续专注 90 分钟：${activity}`, 'moment', 'focus-90', day, now);
+    } else if (this.state.focusMin >= 60) {
+      this.addAutoAnchor(`连续专注 60 分钟：${activity}`, 'moment', 'focus-60', day, now);
+    }
+  }
+
+  private addAutoAnchor(
+    text: string,
+    kind: AnchorKind,
+    eventKey: string,
+    day: string,
+    at: number,
+  ): void {
+    if (this.memory.countAutoAnchors(day) >= 2) return;
+    if (this.memory.hasAutoAnchorEvent(day, eventKey)) return;
+    const anchor = this.memory.addAnchor(text, kind, {
+      source: 'auto',
+      confidence: 0.85,
+      day,
+      at,
+    });
+    if (anchor) this.memory.markAutoAnchorEvent(day, eventKey, anchor.id);
+  }
+
+  private isQuietContext(
+    now: number,
+    active: {
+      app?: string;
+      title?: string;
+      bounds?: { x: number; y: number; width: number; height: number };
+    } | null,
+    display: {
+      bounds: { x: number; y: number; width: number; height: number };
+    },
+  ): boolean {
+    const settings = this.memory.getSettings();
+    if (
+      isQuietHours(
+        new Date(now),
+        settings.quietHoursEnabled,
+        settings.quietStart,
+        settings.quietEnd,
+      )
+    ) {
+      return true;
+    }
+
+    if (!active) return false;
+    const appName = active.app?.trim().toLowerCase() ?? '';
+    if (appName && MEETING_APPS.some((name) => appName.includes(name))) return true;
+    const title = active.title?.trim().toLowerCase() ?? '';
+    if (title && MEETING_TITLE_PATTERNS.test(title)) return true;
+
+    // 只把“真正铺满整块屏幕”的窗口当作全屏；最大化窗口通常留着菜单栏，不算。
+    const bounds = active.bounds;
+    const screenBounds = display.bounds;
+    if (!bounds || !screenBounds) return false;
+    return (
+      bounds.width >= screenBounds.width * 0.98 &&
+      bounds.height >= screenBounds.height * 0.98 &&
+      Math.abs(bounds.x - screenBounds.x) <= 2 &&
+      Math.abs(bounds.y - screenBounds.y) <= 2
+    );
+  }
+
+  private async maybeCompanionMoment(
+    now: number,
+    idleSec: number,
+  ): Promise<CompanionMoment | null> {
+    if (this.memory.getSettings().dnd) return null;
+    if (Date.now() - this.lastSpokenAt < SPEECH_COOLDOWN_MS) return null;
+
+    const current = new Date(now);
+    const today = localDay(current);
+    const todayRecord = this.memory.getCompanionDay(today);
+
+    // 白天第一次看到用户：接上昨天，最多一次。
+    if (isMorningWindow(current) && !todayRecord.callbackAt && idleSec < 300) {
+      const anchors = this.memory.getAnchors(previousDay(today), 3);
+      const commitments = this.recentCommitments(now);
+      if (anchors.length === 0 && commitments.length === 0) return null;
+      if (this.memory.isEventMuted('companion:morning')) return null;
+      const generated = await this.generateCompanionText('morning', anchors, commitments);
+      return generated.text
+        ? { text: generated.text, kind: 'morning', day: today, source: generated.source }
+        : null;
+    }
+
+    // 晚上用户空闲下来：一句收尾 + 一个具体问题，最多一次。
+    // 过了午夜还算“昨天”的收尾，避免 00:30 时找不到今天的锚点。
+    const recapDay = recapDayFor(current);
+    const recapRecord = this.memory.getCompanionDay(recapDay);
+    if (isEveningWindow(current) && !recapRecord.recapAt && idleSec >= 300) {
+      const anchors = this.memory.getAnchors(recapDay, 3);
+      if (anchors.length === 0) return null;
+      if (this.memory.isEventMuted('companion:evening')) return null;
+      const commitments = this.recentCommitments(now);
+      const generated = await this.generateCompanionText('evening', anchors, commitments);
+      return generated.text
+        ? { text: generated.text, kind: 'evening', day: recapDay, source: generated.source }
+        : null;
+    }
+
+    return null;
+  }
+
+  private recentCommitments(now: number): Commitment[] {
+    // 只接最近三天的承诺，避免把上周的事反复翻出来。
+    return this.memory
+      .getCommitments('open', 5)
+      .filter((commitment) => now - commitment.at <= 3 * 24 * 60 * 60_000)
+      .slice(0, 3);
+  }
+
+  private async generateCompanionText(
+    kind: CompanionMomentKind,
+    anchors: DailyAnchor[],
+    commitments: Commitment[],
+  ): Promise<{ text: string; source: 'deepseek' | 'mock' }> {
+    if (this.shouldTryApi()) {
+      try {
+        const text = await this.client.generateCompanionLine(
+          kind,
+          anchors.map((anchor) => anchor.text),
+          commitments.map((commitment) => commitment.text),
+        );
+        if (text) return { text, source: 'deepseek' };
+      } catch (error) {
+        this.noteApiError(error);
+      }
+    }
+
+    return {
+      text:
+        kind === 'morning'
+          ? buildMorningFallback(anchors, commitments)
+          : buildEveningFallback(anchors, commitments),
+      source: 'mock',
+    };
+  }
+
+  private makeCompanionPlan(text: string, kind: CompanionMomentKind): UtterancePlan {
+    const clean = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+    return {
+      say: true,
+      displayText: clean.slice(0, 90),
+      speechText: clean,
+      emotion: kind === 'evening' ? 'comfort' : 'think',
+      motion: 'think',
+      urgency: 'low',
+      evidenceIds: [`companion:${kind}`],
+      reason: kind === 'morning' ? '次日问候' : '晚间一句',
+    };
   }
 
   private ensureAudible(event: string, plan: UtterancePlan): UtterancePlan {
@@ -633,7 +1006,7 @@ export class BrainService {
           motion: result === 'pass' ? 'celebrate' : 'comfort',
           reason: '手动模拟验收：确保气泡和语音反馈',
         };
-    const speakingMs = this.isVoiceEnabled() && plan.say ? speakWithSay(plan.speechText) : 0;
+    const speakingMs = this.isVoiceEnabled() && plan.say ? this.speak(plan.speechText) : 0;
     this.emit();
 
     return {
@@ -642,6 +1015,7 @@ export class BrainService {
       speakingMs,
       source: generated.source,
       origin: 'demo',
+      eventType: result === 'pass' ? 'test-pass' : 'test-fail',
     };
   }
 
@@ -652,11 +1026,29 @@ export class BrainService {
     const autoMemoryEnabled = this.memory.getSettings().autoMemory;
     const explicitRemember = /(记住|记一下|别忘|以后都|以后请)/.test(message);
     this.lastUserAskedToRemember = explicitRemember;
+    const companion = this.memory.getCompanionToday();
+    const companionLines = [
+      companion.anchors.length
+        ? `今天的锚点：${companion.anchors
+            .slice(0, 3)
+            .map((anchor) => anchor.text)
+            .join('；')}`
+        : '',
+      companion.commitments.some((item) => item.status === 'open')
+        ? `未完成的承诺：${companion.commitments
+            .filter((item) => item.status === 'open')
+            .slice(0, 3)
+            .map((item) => item.text)
+            .join('；')}`
+        : '',
+    ].filter(Boolean);
     const memoryText = `${
       autoMemoryEnabled
         ? '【自动记忆已开启：稳定的偏好/项目会自动保存，不需要询问用户是否记住。】\n'
         : '【自动记忆已关闭：不要主动保存普通陈述，也不要声称记住了；只有用户明确要求时才可调用 remember。】\n'
-    }${this.memory.getContext(message, 12)}`;
+    }${this.memory.getContext(message, 12)}${
+      companionLines.length ? `\n${companionLines.join('\n')}` : ''
+    }`;
     let replyText = '';
     let source: 'deepseek' | 'mock' = 'mock';
     let rememberedByTool = false;
@@ -698,9 +1090,19 @@ export class BrainService {
       if (autoFact) {
         replyText = `记住了：${autoFact.text}`;
       } else if (/(你记得|记住了什么|你的记忆|有哪些记忆)/.test(message)) {
-        const facts = this.memory.getFacts(20);
-        replyText = facts.length
-          ? `我记得这些：\n${facts.map((fact) => `- ${fact.text}`).join('\n')}`
+        const facts = this.memory.getFacts(12);
+        const anchors = this.memory.getAnchors(undefined, 5);
+        const commitments = this.memory.getCommitments('open', 5);
+        const lines = [
+          ...facts.map((fact) => `- ${fact.text}`),
+          ...anchors.map((anchor) => `- [${anchor.day}] ${anchor.text}`),
+          ...commitments.map(
+            (commitment) =>
+              `- [答应 ${new Date(commitment.at).toLocaleDateString('zh-CN')}] ${commitment.text}`,
+          ),
+        ];
+        replyText = lines.length
+          ? `我记得这些：\n${lines.join('\n')}`
           : '我还没有保存长期记忆。';
       } else {
         replyText = this.mock.chat(this.state, message).text;
@@ -725,42 +1127,77 @@ export class BrainService {
     this.emit();
 
     if (
-      source === 'deepseek' &&
       !autoFact &&
       !rememberedByTool &&
       this.memory.getSettings().autoMemory &&
       message.length >= 8
     ) {
-      void this.extractAutoMemories(message, replyText);
+      void this.extractCompanionSignals(message, replyText);
     }
 
     return { text: replyText, source };
   }
 
-  private async extractAutoMemories(userMessage: string, assistantReply: string): Promise<void> {
-    if (!this.memory.getSettings().autoMemory || !this.shouldTryApi()) return;
+  private async extractCompanionSignals(
+    userMessage: string,
+    assistantReply: string,
+  ): Promise<void> {
+    if (!this.memory.getSettings().autoMemory) return;
     if (/^(扫描|打开|关闭|测试|你好|嗨|在吗|谢谢)/.test(userMessage.trim()) && userMessage.length < 24) {
       return;
     }
 
-    try {
-      const candidates = await this.client.extractMemories(userMessage, assistantReply);
-      let added = 0;
-      for (const candidate of candidates) {
-        if (candidate.confidence < 0.6) continue;
-        this.memory.remember(candidate.text, candidate.kind, {
+    let facts: MemoryCandidate[] = [];
+    let anchors: CompanionAnchorCandidate[] = [];
+    let commitments: CompanionCommitmentCandidate[] = [];
+    let usedApi = false;
+
+    if (this.shouldTryApi()) {
+      try {
+        const signals = await this.client.extractCompanionSignals(userMessage, assistantReply);
+        facts = signals.facts;
+        anchors = signals.anchors;
+        commitments = signals.commitments;
+        usedApi = true;
+      } catch (error) {
+        console.warn(
+          '陪伴记忆提取失败，改用本地规则',
+          error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
+        );
+      }
+    }
+
+    if (!usedApi) {
+      const local = extractLocalSignals(userMessage);
+      anchors = local.anchors;
+      commitments = local.commitments;
+    }
+
+    let added = 0;
+    for (const candidate of facts) {
+      if (candidate.confidence < 0.6) continue;
+      this.memory.remember(candidate.text, candidate.kind, {
+        source: 'auto',
+        confidence: candidate.confidence,
+      });
+      added += 1;
+    }
+    for (const anchor of anchors) {
+      if (anchor.confidence < 0.5) continue;
+      if (
+        this.memory.addAnchor(anchor.text, anchor.kind, {
           source: 'auto',
-          confidence: candidate.confidence,
-        });
+          confidence: anchor.confidence,
+        })
+      ) {
         added += 1;
       }
-      if (added > 0) this.emit();
-    } catch (error) {
-      console.warn(
-        '自动记忆提取失败',
-        error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
-      );
     }
+    for (const commitment of commitments) {
+      if (commitment.confidence < 0.5) continue;
+      if (this.memory.addCommitment(commitment.text, commitment.dueHint)) added += 1;
+    }
+    if (added > 0) this.emit();
   }
 
   private autoRemember(message: string): MemoryFact | null {

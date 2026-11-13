@@ -74,3 +74,101 @@ test('editing a fact reindexes FTS and clear removes everything', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('companion anchors, commitments and day markers persist', () => {
+  const { dir, store } = createStore();
+  try {
+    const anchor = store.addAnchor('今天修好了 auth 的 race condition', 'work', {
+      source: 'auto',
+      confidence: 0.8,
+    });
+    assert.ok(anchor);
+    assert.equal(store.getAnchors(anchor.day).length, 1);
+
+    const commitment = store.addCommitment('今晚把数字发给老王', '今晚');
+    assert.ok(commitment);
+    assert.equal(store.getCommitments('open').length, 1);
+
+    store.markCallback(anchor.day, 123);
+    store.markRecap(anchor.day, '今天修好了 auth。', 456);
+    const today = store.getCompanionToday(new Date(`${anchor.day}T12:00:00`));
+    assert.equal(today.anchors.length, 1);
+    assert.equal(today.callbackAt, 123);
+    assert.equal(today.recapAt, 456);
+    assert.match(today.recapText ?? '', /auth/);
+
+    store.completeCommitment(commitment.id);
+    assert.equal(store.getCommitments('open').length, 0);
+    assert.equal(store.getCommitments('done').length, 1);
+
+    store.clear();
+    assert.equal(store.getCompanionToday().anchors.length, 0);
+    assert.equal(store.getCommitments('all').length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('anchor editing, tombstones, auto events, feedback mutes and export', () => {
+  const { dir, store } = createStore();
+  try {
+    const anchor = store.addAnchor('原始锚点', 'work', { source: 'auto' });
+    assert.ok(anchor);
+
+    const updated = store.updateAnchor(anchor.id, '改过的锚点', 'feeling');
+    assert.equal(updated?.text, '改过的锚点');
+    assert.equal(updated?.kind, 'feeling');
+    assert.equal(updated?.source, 'explicit');
+
+    const tombstone = store.addAnchor('删掉不要再生成', 'work', { source: 'auto' });
+    assert.ok(tombstone);
+    store.deleteAnchor(tombstone.id);
+    assert.equal(store.getAnchors(tombstone.day).some((item) => item.id === tombstone.id), false);
+    assert.equal(store.addAnchor('删掉不要再生成', 'work', { source: 'auto' }), null);
+    assert.ok(store.addAnchor('删掉不要再生成', 'work', { source: 'explicit' }));
+
+    assert.equal(store.countAutoAnchors(anchor.day), 0);
+    const auto = store.addAnchor('另一个自动锚点', 'work', { source: 'auto' });
+    assert.ok(auto);
+    assert.equal(store.countAutoAnchors(anchor.day), 1);
+    assert.equal(store.hasAutoAnchorEvent(anchor.day, 'focus-60'), false);
+    store.markAutoAnchorEvent(anchor.day, 'focus-60', auto.id);
+    assert.equal(store.hasAutoAnchorEvent(anchor.day, 'focus-60'), true);
+
+    store.recordBubbleFeedback('observe', 'dismiss');
+    assert.equal(store.isEventMuted('observe'), false);
+    store.recordBubbleFeedback('observe', 'dismiss');
+    assert.equal(store.isEventMuted('observe'), true);
+    store.recordBubbleFeedback('observe', 'open');
+    assert.equal(store.isEventMuted('observe'), false);
+
+    const data = store.exportData();
+    assert.ok(data.anchors.length >= 2);
+    assert.equal(data.exportedAt > 0, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('voice, persona and quiet hours are persisted with clamps', () => {
+  const { dir, store } = createStore();
+  try {
+    store.updateSettings({
+      voiceName: 'Samantha',
+      speechRate: 999,
+      persona: 'x'.repeat(3000),
+      quietHoursEnabled: true,
+      quietStart: '25:00',
+      quietEnd: '08:00',
+    });
+    const settings = store.getSettings();
+    assert.equal(settings.voiceName, 'Samantha');
+    assert.equal(settings.speechRate, 260);
+    assert.equal(settings.persona.length, 2000);
+    assert.equal(settings.quietHoursEnabled, true);
+    assert.equal(settings.quietStart, '23:30');
+    assert.equal(settings.quietEnd, '08:00');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -2,11 +2,14 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AppStatus,
   AvatarConfig,
+  BubbleFeedbackAction,
   ChatMessage,
   ChatReply,
+  CompanionToday,
   DeskMateApi,
   HitRect,
   MemoryFact,
+  SayVoice,
   ScanResult,
   UtterancePayload,
 } from '../shared/types';
@@ -30,6 +33,43 @@ const api: DeskMateApi = {
   getChatHistory: () => ipcRenderer.invoke('chat:history') as Promise<ChatMessage[]>,
 
   getMemoryFacts: () => ipcRenderer.invoke('memory:facts') as Promise<MemoryFact[]>,
+
+  getCompanionToday: () =>
+    ipcRenderer.invoke('companion:today') as Promise<CompanionToday>,
+
+  addAnchor: (text: string, kind?: 'work' | 'feeling' | 'open_loop' | 'moment') =>
+    ipcRenderer.invoke('companion:add-anchor', text, kind) as Promise<CompanionToday>,
+
+  deleteAnchor: (id: string) =>
+    ipcRenderer.invoke('companion:delete-anchor', id) as Promise<CompanionToday>,
+
+  addCommitment: (text: string, dueHint?: string) =>
+    ipcRenderer.invoke('companion:add-commitment', text, dueHint) as Promise<CompanionToday>,
+
+  completeCommitment: (id: string, done: boolean) =>
+    ipcRenderer.invoke('companion:complete-commitment', id, done) as Promise<CompanionToday>,
+
+  deleteCommitment: (id: string) =>
+    ipcRenderer.invoke('companion:delete-commitment', id) as Promise<CompanionToday>,
+
+  updateAnchor: (id: string, text: string, kind: 'work' | 'feeling' | 'open_loop' | 'moment') =>
+    ipcRenderer.invoke('companion:update-anchor', id, text, kind) as Promise<CompanionToday>,
+
+  sendBubbleFeedback: (eventType: string, action: BubbleFeedbackAction) =>
+    ipcRenderer.invoke('feedback:bubble', eventType, action) as Promise<void>,
+
+  getVoiceOptions: () => ipcRenderer.invoke('voice:list') as Promise<SayVoice[]>,
+
+  setVoiceSettings: (voiceName: string, speechRate: number) =>
+    ipcRenderer.invoke('settings:set-voice-settings', voiceName, speechRate) as Promise<AppStatus>,
+
+  setPersona: (text: string) =>
+    ipcRenderer.invoke('settings:set-persona', text) as Promise<AppStatus>,
+
+  setQuietHours: (enabled: boolean, start: string, end: string) =>
+    ipcRenderer.invoke('settings:set-quiet-hours', enabled, start, end) as Promise<AppStatus>,
+
+  exportMemory: () => ipcRenderer.invoke('memory:export') as Promise<string | null>,
 
   addMemory: (text: string, kind?: 'project' | 'preference' | 'fact') =>
     ipcRenderer.invoke('memory:add', text, kind) as Promise<AppStatus>,
@@ -90,6 +130,12 @@ const api: DeskMateApi = {
     };
     ipcRenderer.on('status:changed', listener);
     return () => ipcRenderer.removeListener('status:changed', listener);
+  },
+
+  onOpenCompanion: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('panel:open-companion', listener);
+    return () => ipcRenderer.removeListener('panel:open-companion', listener);
   },
 };
 

@@ -22,9 +22,11 @@ export default function AvatarApp() {
   const [modelRect, setModelRect] = useState<HitRect>({ x: 0, y: 0, w: 0, h: 0 });
   const bubbleRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<number | null>(null);
+  const lastEventType = useRef('unknown');
 
   const onHitRect = useCallback((rect: HitRect) => setModelRect(rect), []);
   const onOpenPanel = useCallback(() => {
+    void window.deskmate.sendBubbleFeedback(lastEventType.current, 'open');
     void window.deskmate.openPanel();
   }, []);
 
@@ -35,6 +37,8 @@ export default function AvatarApp() {
   useEffect(() => {
     const off = window.deskmate.onUtterance((payload) => {
       if (!payload.plan.say) return;
+      lastEventType.current =
+        payload.eventType ?? payload.plan.evidenceIds[0] ?? payload.origin;
       setPlan(payload.plan);
       setSpeakingUntil(performance.now() + payload.speakingMs);
       setBubbleVisible(true);
@@ -66,6 +70,7 @@ export default function AvatarApp() {
 
   const closeBubble = useCallback(() => {
     setBubbleVisible(false);
+    void window.deskmate.sendBubbleFeedback(lastEventType.current, 'dismiss');
   }, []);
 
   return (

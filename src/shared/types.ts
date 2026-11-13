@@ -69,6 +69,12 @@ export interface AppStatus {
   platform: string;
   voice: string;
   voiceEnabled: boolean;
+  voiceName: string;
+  speechRate: number;
+  persona: string;
+  quietHoursEnabled: boolean;
+  quietStart: string;
+  quietEnd: string;
   screenStatus: ScreenStatus;
   dnd: boolean;
   memoryCount: number;
@@ -78,6 +84,45 @@ export interface AppStatus {
   visionCallsThisHour: number;
   scanStats: ScanStats;
   state: DemoState;
+}
+
+export type AnchorKind = 'work' | 'feeling' | 'open_loop' | 'moment';
+
+export type CommitmentStatus = 'open' | 'done';
+
+export interface DailyAnchor {
+  id: string;
+  day: string;
+  text: string;
+  kind: AnchorKind;
+  source: MemorySource;
+  confidence: number;
+  at: number;
+}
+
+export interface Commitment {
+  id: string;
+  text: string;
+  dueHint?: string;
+  status: CommitmentStatus;
+  at: number;
+  lastAskedAt?: number;
+}
+
+export interface CompanionDay {
+  day: string;
+  callbackAt?: number;
+  recapAt?: number;
+  recapText?: string;
+}
+
+export interface CompanionToday {
+  day: string;
+  anchors: DailyAnchor[];
+  commitments: Commitment[];
+  callbackAt?: number;
+  recapAt?: number;
+  recapText?: string;
 }
 
 export type MemoryKind = 'project' | 'preference' | 'fact';
@@ -104,6 +149,27 @@ export interface AgentSettings {
   excludedApps: string[];
   scanIntervalMs: number;
   avatarPosition?: { x: number; y: number };
+  voiceName: string;
+  speechRate: number;
+  persona: string;
+  quietHoursEnabled: boolean;
+  quietStart: string;
+  quietEnd: string;
+}
+
+export interface SayVoice {
+  name: string;
+  locale: string;
+}
+
+export type BubbleFeedbackAction = 'dismiss' | 'open';
+
+export interface MemoryExport {
+  exportedAt: number;
+  facts: MemoryFact[];
+  anchors: DailyAnchor[];
+  commitments: Commitment[];
+  companionDays: CompanionDay[];
 }
 
 export interface Inspection {
@@ -153,6 +219,7 @@ export interface UtterancePayload {
   speakingMs: number;
   source: 'deepseek' | 'mock';
   origin: 'chat' | 'proactive' | 'demo' | 'scan';
+  eventType?: string;
 }
 
 export interface ChatReply {
@@ -187,6 +254,20 @@ export interface DeskMateApi {
   pausePerception(minutes: number): Promise<AppStatus>;
   resumePerception(): Promise<AppStatus>;
   setPrivacySettings(excludedApps: string[]): Promise<AppStatus>;
+  getCompanionToday(): Promise<CompanionToday>;
+  addAnchor(text: string, kind?: AnchorKind): Promise<CompanionToday>;
+  deleteAnchor(id: string): Promise<CompanionToday>;
+  addCommitment(text: string, dueHint?: string): Promise<CompanionToday>;
+  completeCommitment(id: string, done: boolean): Promise<CompanionToday>;
+  deleteCommitment(id: string): Promise<CompanionToday>;
+  updateAnchor(id: string, text: string, kind: AnchorKind): Promise<CompanionToday>;
+  sendBubbleFeedback(eventType: string, action: BubbleFeedbackAction): Promise<void>;
+  getVoiceOptions(): Promise<SayVoice[]>;
+  setVoiceSettings(voiceName: string, speechRate: number): Promise<AppStatus>;
+  setPersona(text: string): Promise<AppStatus>;
+  setQuietHours(enabled: boolean, start: string, end: string): Promise<AppStatus>;
+  exportMemory(): Promise<string | null>;
+  onOpenCompanion(cb: () => void): () => void;
   openPanel(): Promise<void>;
   closePanel(): Promise<void>;
   setHitRect(rect: HitRect): Promise<void>;

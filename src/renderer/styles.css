@@ -1478,6 +1478,62 @@ body[data-route="panel"] ::selection {
   color: var(--accent-2);
 }
 
+.memory-kind.work {
+  background: rgba(127, 212, 255, 0.1);
+  color: var(--blue);
+}
+
+.memory-kind.feeling {
+  background: rgba(255, 143, 177, 0.12);
+  color: #ff9ab6;
+}
+
+.memory-kind.open_loop {
+  background: rgba(255, 196, 107, 0.12);
+  color: var(--amber);
+}
+
+.memory-kind.moment {
+  background: rgba(139, 124, 255, 0.12);
+  color: var(--accent-2);
+}
+
+.companion-sheet {
+  overflow-y: auto;
+}
+
+.companion-section {
+  margin-top: 12px;
+}
+
+.companion-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 0 0;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.companion-section-head b {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.companion-sheet .memory-list {
+  min-height: 56px;
+  max-height: 170px;
+  flex: none;
+}
+
+.memory-item.done {
+  opacity: 0.55;
+}
+
 .memory-source {
   padding: 2px 5px;
   border-radius: 999px;
@@ -1780,4 +1836,160 @@ body[data-route="panel"] ::selection {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* 陪伴视图：今天 + 诊断折叠 + 设置行 */
+.context-insight.diagnostics {
+  display: block;
+}
+
+.context-insight.diagnostics summary {
+  width: fit-content;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.context-insight.diagnostics summary::-webkit-details-marker {
+  display: none;
+}
+
+.context-insight.diagnostics summary::before {
+  margin-right: 5px;
+  color: var(--dim);
+  content: "▸";
+}
+
+.context-insight.diagnostics[open] summary::before {
+  content: "▾";
+}
+
+.diagnostics-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  margin-top: 7px;
+  color: var(--dim);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.diagnostics-grid span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.diagnostics-grid span + span::before {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  content: "";
+}
+
+.today-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.today-sub {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.today-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.today-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.today-text {
+  min-width: 0;
+  flex: 1;
+  color: var(--text);
+}
+
+.today-item time {
+  flex: none;
+  color: var(--dim);
+  font-size: 8px;
+}
+
+.today-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--dim);
+  font-size: 9px;
+}
+
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings-row select,
+.settings-row input[type="time"] {
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0 9px;
+  color: var(--text);
+  font-size: 10px;
+}
+
+.settings-row select {
+  max-width: 210px;
+}
+
+.settings-row input[type="range"] {
+  min-width: 90px;
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.settings-value {
+  min-width: 28px;
+  color: var(--dim);
+  font-size: 9px;
+  text-align: center;
+}
+
+.memory-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

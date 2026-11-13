@@ -1,5 +1,6 @@
 import {
   app,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
@@ -13,6 +14,7 @@ import type {
   ChatMessage,
   DemoState,
   HitRect,
+  MemoryExport,
   ScanResult,
   UtterancePayload,
   UtterancePlan,
@@ -20,7 +22,7 @@ import type {
 import { BrainService } from './brain';
 import { startEventBridge, type EventBridge } from './eventBridge';
 import { readActiveWindow } from './perception';
-import { speakWithSay } from './tts';
+import { listSayVoices } from './tts';
 import {
   createAvatarWindow,
   createPanelWindow,
@@ -77,6 +79,11 @@ function startHitTestLoop(): void {
   }, 50);
 }
 
+function openCompanionCapture(): void {
+  showPanel();
+  setTimeout(() => sendToAll('panel:open-companion', null), 160);
+}
+
 function createTray(): void {
   try {
     const icon = nativeImage.createFromPath(assetPath('trayTemplate.png')).resize({
@@ -104,6 +111,7 @@ function createTray(): void {
 
     const menu = Menu.buildFromTemplate([
       { label: '打开面板', click: () => showPanel() },
+      { label: '记一下…', click: openCompanionCapture },
       { label: '把 Haru 叫到当前屏幕', click: moveToCursorDisplay },
       { type: 'separator' },
       {
@@ -146,10 +154,10 @@ function performUtterance(
   state: DemoState,
   source: 'deepseek' | 'mock',
   origin: 'scan' | 'proactive' | 'demo',
+  eventType = 'unknown',
 ): UtterancePayload {
-  const speakingMs =
-    brain.isVoiceEnabled() && plan.say ? speakWithSay(plan.speechText) : 0;
-  const payload: UtterancePayload = { plan, state, speakingMs, source, origin };
+  const speakingMs = brain.isVoiceEnabled() && plan.say ? brain.speak(plan.speechText) : 0;
+  const payload: UtterancePayload = { plan, state, speakingMs, source, origin, eventType };
   sendToAll('avatar:perform', payload);
   return payload;
 }
@@ -200,6 +208,7 @@ function buildScanFeedback(result: ScanResult): UtterancePayload {
     result.state,
     result.source === 'deepseek' ? 'deepseek' : 'mock',
     'scan',
+    'scan',
   );
 }
 
@@ -223,6 +232,7 @@ function sendStartupGreeting(): void {
     brain.getStatus().state,
     'mock',
     'proactive',
+    'startup',
   );
 }
 
@@ -301,6 +311,41 @@ function startPerceptionLoop(): void {
   }, 12_000);
 }
 
+function memoryExportMarkdown(data: MemoryExport): string {
+  const lines: string[] = [
+    '# DeskMate 记忆导出',
+    '',
+    `导出时间：${new Date(data.exportedAt).toLocaleString('zh-CN')}`,
+    '',
+    '## 长期事实',
+  ];
+  if (data.facts.length === 0) lines.push('（暂无）');
+  for (const fact of data.facts) lines.push(`- [${fact.kind}] ${fact.text}`);
+
+  lines.push('', '## 锚点');
+  if (data.anchors.length === 0) lines.push('（暂无）');
+  for (const anchor of data.anchors) {
+    lines.push(`- ${anchor.day} [${anchor.kind}] ${anchor.text}`);
+  }
+
+  lines.push('', '## 承诺');
+  if (data.commitments.length === 0) lines.push('（暂无）');
+  for (const commitment of data.commitments) {
+    lines.push(`- [${commitment.status === 'done' ? 'x' : ' '}] ${commitment.text}`);
+  }
+
+  lines.push('', '## 日结标记');
+  if (data.companionDays.length === 0) lines.push('（暂无）');
+  for (const day of data.companionDays) {
+    const bits = [
+      day.callbackAt ? '有次日问候' : '',
+      day.recapText ? `晚间一句：${day.recapText}` : '',
+    ].filter(Boolean);
+    if (bits.length) lines.push(`- ${day.day}：${bits.join('；')}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 function registerIpc(): void {
   ipcMain.handle('app:status', () => brain.getStatus());
   ipcMain.handle('avatar:config', () => brain.getAvatarConfig());
@@ -319,7 +364,7 @@ function registerIpc(): void {
       // 聊天回复也走同一套 say + 气泡/口型通道。
       if (spoken) {
         const speechText = spoken.slice(0, 240);
-        const speakingMs = brain.isVoiceEnabled() ? speakWithSay(speechText) : 0;
+        const speakingMs = brain.isVoiceEnabled() ? brain.speak(speechText) : 0;
         sendToAll('avatar:perform', {
           plan: {
             say: true,
@@ -335,6 +380,7 @@ function registerIpc(): void {
           speakingMs,
           source: reply.source,
           origin: 'chat',
+          eventType: 'chat',
         });
       }
 
@@ -351,6 +397,64 @@ function registerIpc(): void {
   ipcMain.handle('memory:update', (_event, id: string, text: string, kind) =>
     brain.updateFact(String(id), String(text), kind),
   );
+  ipcMain.handle('companion:today', () => brain.getCompanionToday());
+  ipcMain.handle('companion:add-anchor', (_event, text: string, kind?: string) =>
+    brain.addAnchor(
+      String(text),
+      kind === 'feeling' || kind === 'open_loop' || kind === 'moment' ? kind : 'work',
+    ),
+  );
+  ipcMain.handle('companion:delete-anchor', (_event, id: string) =>
+    brain.deleteAnchor(String(id)),
+  );
+  ipcMain.handle('companion:add-commitment', (_event, text: string, dueHint?: string) =>
+    brain.addCommitment(String(text), dueHint ? String(dueHint) : undefined),
+  );
+  ipcMain.handle('companion:complete-commitment', (_event, id: string, done: boolean) =>
+    brain.completeCommitment(String(id), Boolean(done)),
+  );
+  ipcMain.handle('companion:delete-commitment', (_event, id: string) =>
+    brain.deleteCommitment(String(id)),
+  );
+  ipcMain.handle('companion:update-anchor', (_event, id: string, text: string, kind?: string) =>
+    brain.updateAnchor(
+      String(id),
+      String(text),
+      kind === 'feeling' || kind === 'open_loop' || kind === 'moment' ? kind : 'work',
+    ),
+  );
+  ipcMain.handle('feedback:bubble', (_event, eventType: string, action: string) => {
+    brain.recordBubbleFeedback(String(eventType), action === 'open' ? 'open' : 'dismiss');
+  });
+  ipcMain.handle('voice:list', () => listSayVoices());
+  ipcMain.handle('settings:set-voice-settings', (_event, voiceName: string, speechRate: number) =>
+    brain.setVoiceSettings(String(voiceName), Number(speechRate) || 180),
+  );
+  ipcMain.handle('settings:set-persona', (_event, text: string) => brain.setPersona(String(text)));
+  ipcMain.handle('settings:set-quiet-hours', (_event, enabled: boolean, start: string, end: string) =>
+    brain.setQuietHours(Boolean(enabled), String(start), String(end)),
+  );
+  ipcMain.handle('memory:export', async () => {
+    const result = await dialog.showSaveDialog({
+      title: '导出 DeskMate 记忆',
+      defaultPath: path.join(
+        app.getPath('documents'),
+        `deskmate-memory-${new Date().toISOString().slice(0, 10)}.json`,
+      ),
+      filters: [
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'Markdown', extensions: ['md'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return null;
+
+    const data = brain.exportMemory();
+    const content = result.filePath.toLowerCase().endsWith('.md')
+      ? memoryExportMarkdown(data)
+      : JSON.stringify(data, null, 2);
+    fs.writeFileSync(result.filePath, content, 'utf8');
+    return result.filePath;
+  });
   ipcMain.handle('settings:set-auto-memory', (_event, enabled: boolean) =>
     brain.setAutoMemory(Boolean(enabled)),
   );
@@ -420,6 +524,9 @@ function registerShortcuts(): void {
     togglePanel();
   });
   if (!ok) console.warn('全局快捷键注册失败：CommandOrControl+Shift+Space');
+
+  const captureOk = globalShortcut.register('CommandOrControl+Shift+M', openCompanionCapture);
+  if (!captureOk) console.warn('全局快捷键注册失败：CommandOrControl+Shift+M');
 }
 
 app.setName('DeskMate');

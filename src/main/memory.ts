@@ -4,7 +4,14 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   AgentSettings,
+  AnchorKind,
   ChatMessage,
+  Commitment,
+  CommitmentStatus,
+  CompanionDay,
+  CompanionToday,
+  DailyAnchor,
+  MemoryExport,
   MemoryFact,
   MemoryKind,
   MemorySource,
@@ -16,6 +23,12 @@ const DEFAULT_SETTINGS: AgentSettings = {
   autoMemory: true,
   excludedApps: ['1Password', 'Keychain Access', 'Passwords', 'System Settings', 'System Preferences'],
   scanIntervalMs: 60_000,
+  voiceName: 'Tingting',
+  speechRate: 180,
+  persona: '',
+  quietHoursEnabled: false,
+  quietStart: '23:30',
+  quietEnd: '08:00',
 };
 
 const MAX_FACTS = 100;
@@ -37,6 +50,16 @@ const KIND_LABEL: Record<MemoryKind, string> = {
   preference: '偏好',
   fact: '事实',
 };
+
+function clampTime(value: unknown, fallback: string): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const match = /^(\d{1,2}):(\d{2})$/.exec(text);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
 
 function clampSettings(value: unknown): AgentSettings {
   const raw = (value ?? {}) as Partial<AgentSettings>;
@@ -60,6 +83,15 @@ function clampSettings(value: unknown): AgentSettings {
     ...(perceptionPausedUntil ? { perceptionPausedUntil } : {}),
     scanIntervalMs: Math.max(20_000, Number(raw.scanIntervalMs) || DEFAULT_SETTINGS.scanIntervalMs),
     ...(avatarPosition ? { avatarPosition } : {}),
+    voiceName:
+      typeof raw.voiceName === 'string' && raw.voiceName.trim()
+        ? raw.voiceName.trim().slice(0, 60)
+        : DEFAULT_SETTINGS.voiceName,
+    speechRate: Math.min(260, Math.max(120, Math.round(Number(raw.speechRate) || DEFAULT_SETTINGS.speechRate))),
+    persona: typeof raw.persona === 'string' ? raw.persona.slice(0, 2000) : '',
+    quietHoursEnabled: Boolean(raw.quietHoursEnabled),
+    quietStart: clampTime(raw.quietStart, DEFAULT_SETTINGS.quietStart),
+    quietEnd: clampTime(raw.quietEnd, DEFAULT_SETTINGS.quietEnd),
   };
 }
 
@@ -72,6 +104,13 @@ function detectKind(text: string, kind?: MemoryKind): MemoryKind {
 
 function normalize(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+function localDay(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function compact(text: string): string {
@@ -122,6 +161,40 @@ interface FactRow {
   use_count: number;
 }
 
+interface AnchorRow {
+  id: string;
+  day: string;
+  text: string;
+  kind: string;
+  source: string;
+  confidence: number;
+  created_at: number;
+  hidden: number;
+}
+
+interface CommitmentRow {
+  id: string;
+  text: string;
+  due_hint: string | null;
+  status: string;
+  created_at: number;
+  last_asked_at: number | null;
+}
+
+interface CompanionDayRow {
+  day: string;
+  callback_at: number | null;
+  recap_at: number | null;
+  recap_text: string | null;
+}
+
+interface FeedbackMuteRow {
+  event_type: string;
+  muted_until: number;
+  dismiss_count: number;
+  updated_at: number;
+}
+
 interface MessageRow {
   role: string;
   text: string;
@@ -146,6 +219,47 @@ function toFact(row: FactRow): MemoryFact {
     updatedAt: Number(row.updated_at) || Number(row.created_at) || Date.now(),
     lastUsedAt: row.last_used_at ? Number(row.last_used_at) : undefined,
     useCount: Number(row.use_count) || 0,
+  };
+}
+
+function toAnchor(row: AnchorRow): DailyAnchor {
+  const kind: AnchorKind =
+    row.kind === 'feeling' || row.kind === 'open_loop' || row.kind === 'moment'
+      ? row.kind
+      : 'work';
+  const source: MemorySource =
+    row.source === 'tool' || row.source === 'auto' || row.source === 'migration'
+      ? row.source
+      : 'explicit';
+  return {
+    id: row.id,
+    day: row.day,
+    text: row.text,
+    kind,
+    source,
+    confidence: Math.min(1, Math.max(0, Number(row.confidence) || 0.8)),
+    at: Number(row.created_at) || Date.now(),
+  };
+}
+
+function toCommitment(row: CommitmentRow): Commitment {
+  const status: CommitmentStatus = row.status === 'done' ? 'done' : 'open';
+  return {
+    id: row.id,
+    text: row.text,
+    dueHint: row.due_hint ?? undefined,
+    status,
+    at: Number(row.created_at) || Date.now(),
+    lastAskedAt: row.last_asked_at ? Number(row.last_asked_at) : undefined,
+  };
+}
+
+function toCompanionDay(row: CompanionDayRow | undefined, day: string): CompanionDay {
+  return {
+    day,
+    callbackAt: row?.callback_at ? Number(row.callback_at) : undefined,
+    recapAt: row?.recap_at ? Number(row.recap_at) : undefined,
+    recapText: row?.recap_text ?? undefined,
   };
 }
 
@@ -200,6 +314,51 @@ export class MemoryStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS anchors (
+        id TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        text TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'work',
+        source TEXT NOT NULL DEFAULT 'auto',
+        confidence REAL NOT NULL DEFAULT 0.8,
+        created_at INTEGER NOT NULL,
+        hidden INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS anchors_day ON anchors(day, created_at);
+      CREATE TABLE IF NOT EXISTS auto_anchor_events (
+        day TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        anchor_id TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (day, event_key)
+      );
+      CREATE TABLE IF NOT EXISTS feedback_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS feedback_mutes (
+        event_type TEXT PRIMARY KEY,
+        muted_until INTEGER NOT NULL DEFAULT 0,
+        dismiss_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS commitments (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        due_hint TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL,
+        last_asked_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS commitments_status ON commitments(status, created_at);
+      CREATE TABLE IF NOT EXISTS companion_days (
+        day TEXT PRIMARY KEY,
+        callback_at INTEGER,
+        recap_at INTEGER,
+        recap_text TEXT
+      );
       CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
         text,
         content='facts',
@@ -233,6 +392,15 @@ export class MemoryStore {
       if (!columns.has(name)) {
         this.db.exec(`ALTER TABLE facts ADD COLUMN ${name} ${definition}`);
       }
+    }
+
+    const anchorColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(anchors)').all() as unknown as Array<{ name: string }>).map(
+        (row) => row.name,
+      ),
+    );
+    if (!anchorColumns.has('hidden')) {
+      this.db.exec('ALTER TABLE anchors ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -550,8 +718,332 @@ export class MemoryStore {
     }));
   }
 
+  addAnchor(
+    text: string,
+    kind: AnchorKind = 'work',
+    options: {
+      source?: MemorySource;
+      confidence?: number;
+      day?: string;
+      at?: number;
+    } = {},
+  ): DailyAnchor | null {
+    const clean = normalize(text).slice(0, 120);
+    if (!clean) return null;
+
+    const at = options.at ?? Date.now();
+    const day = options.day ?? localDay(new Date(at));
+    const existing = this.db
+      .prepare(
+        `SELECT id, day, text, kind, source, confidence, created_at, hidden
+         FROM anchors WHERE day = ? AND lower(text) = lower(?) LIMIT 1`,
+      )
+      .get(day, clean) as unknown as AnchorRow | undefined;
+    if (existing) {
+      if (!existing.hidden) return toAnchor(existing);
+      // 用户删掉的锚点，自动来源不再重复生成；手动添加可以把它恢复。
+      if (options.source !== 'explicit') return null;
+      this.db
+        .prepare(
+          `UPDATE anchors
+           SET hidden = 0, source = 'explicit', confidence = 1, created_at = ?
+           WHERE id = ?`,
+        )
+        .run(at, existing.id);
+      return this.getAnchor(existing.id);
+    }
+
+    const anchor: DailyAnchor = {
+      id: randomUUID(),
+      day,
+      text: clean,
+      kind,
+      source: options.source ?? 'auto',
+      confidence: Math.min(1, Math.max(0, options.confidence ?? 0.8)),
+      at,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO anchors (id, day, text, kind, source, confidence, created_at, hidden)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+      )
+      .run(
+        anchor.id,
+        anchor.day,
+        anchor.text,
+        anchor.kind,
+        anchor.source,
+        anchor.confidence,
+        anchor.at,
+      );
+
+    // 一天最多留 8 个锚点，避免又变成流水账。
+    this.db
+      .prepare(
+        `DELETE FROM anchors
+         WHERE day = ? AND id NOT IN (
+           SELECT id FROM anchors WHERE day = ? ORDER BY created_at DESC LIMIT 8
+         )`,
+      )
+      .run(day, day);
+    return anchor;
+  }
+
+  getAnchors(day?: string, limit = 20): DailyAnchor[] {
+    // 自动锚点 30 天后自动淡出；手动/工具来源长期保留。
+    const cutoff = Date.now() - 30 * 24 * 60 * 60_000;
+    const rows = day
+      ? (this.db
+          .prepare(
+            `SELECT id, day, text, kind, source, confidence, created_at, hidden
+             FROM anchors
+             WHERE hidden = 0 AND day = ? AND (source != 'auto' OR created_at >= ?)
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(day, cutoff, Math.max(1, limit)) as unknown as AnchorRow[])
+      : (this.db
+          .prepare(
+            `SELECT id, day, text, kind, source, confidence, created_at, hidden
+             FROM anchors
+             WHERE hidden = 0 AND (source != 'auto' OR created_at >= ?)
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(cutoff, Math.max(1, limit)) as unknown as AnchorRow[]);
+    return rows.map(toAnchor);
+  }
+
+  private getAnchor(id: string): DailyAnchor | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, day, text, kind, source, confidence, created_at, hidden
+         FROM anchors WHERE id = ? LIMIT 1`,
+      )
+      .get(id) as unknown as AnchorRow | undefined;
+    return row ? toAnchor(row) : null;
+  }
+
+  updateAnchor(id: string, text: string, kind: AnchorKind): DailyAnchor | null {
+    const clean = normalize(text).slice(0, 120);
+    if (!clean) return null;
+    this.db
+      .prepare(
+        `UPDATE anchors
+         SET text = ?, kind = ?, source = 'explicit', confidence = 1, hidden = 0, created_at = ?
+         WHERE id = ?`,
+      )
+      .run(clean, kind, Date.now(), id);
+    return this.getAnchor(id);
+  }
+
+  deleteAnchor(id: string): boolean {
+    return this.db.prepare('UPDATE anchors SET hidden = 1 WHERE id = ?').run(id).changes > 0;
+  }
+
+  countAutoAnchors(day = localDay()): number {
+    return Number(
+      (
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM anchors WHERE day = ? AND source = 'auto' AND hidden = 0",
+          )
+          .get(day) as { count: number }
+      ).count,
+    );
+  }
+
+  hasAutoAnchorEvent(day: string, eventKey: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS found FROM auto_anchor_events WHERE day = ? AND event_key = ? LIMIT 1')
+      .get(day, eventKey) as { found?: number } | undefined;
+    return Boolean(row?.found);
+  }
+
+  markAutoAnchorEvent(day: string, eventKey: string, anchorId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO auto_anchor_events (day, event_key, anchor_id, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(day, event_key) DO UPDATE SET
+           anchor_id = excluded.anchor_id,
+           created_at = excluded.created_at`,
+      )
+      .run(day, eventKey, anchorId, Date.now());
+  }
+
+  addCommitment(text: string, dueHint?: string): Commitment | null {
+    const clean = normalize(text).slice(0, 120);
+    if (!clean) return null;
+
+    const existing = this.db
+      .prepare(
+        `SELECT id, text, due_hint, status, created_at, last_asked_at
+         FROM commitments WHERE status = 'open' AND lower(text) = lower(?) LIMIT 1`,
+      )
+      .get(clean) as unknown as CommitmentRow | undefined;
+    if (existing) return toCommitment(existing);
+
+    const commitment: Commitment = {
+      id: randomUUID(),
+      text: clean,
+      dueHint: dueHint?.trim().slice(0, 40) || undefined,
+      status: 'open',
+      at: Date.now(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO commitments (id, text, due_hint, status, created_at)
+         VALUES (?, ?, ?, 'open', ?)`,
+      )
+      .run(commitment.id, commitment.text, commitment.dueHint ?? null, commitment.at);
+    return commitment;
+  }
+
+  getCommitments(status: CommitmentStatus | 'all' = 'open', limit = 50): Commitment[] {
+    const rows =
+      status === 'all'
+        ? (this.db
+            .prepare(
+              `SELECT id, text, due_hint, status, created_at, last_asked_at
+               FROM commitments
+               ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, created_at DESC
+               LIMIT ?`,
+            )
+            .all(Math.max(1, limit)) as unknown as CommitmentRow[])
+        : (this.db
+            .prepare(
+              `SELECT id, text, due_hint, status, created_at, last_asked_at
+               FROM commitments WHERE status = ?
+               ORDER BY created_at DESC LIMIT ?`,
+            )
+            .all(status, Math.max(1, limit)) as unknown as CommitmentRow[]);
+    return rows.map(toCommitment);
+  }
+
+  completeCommitment(id: string, done = true): boolean {
+    return (
+      this.db
+        .prepare('UPDATE commitments SET status = ? WHERE id = ?')
+        .run(done ? 'done' : 'open', id).changes > 0
+    );
+  }
+
+  deleteCommitment(id: string): boolean {
+    return this.db.prepare('DELETE FROM commitments WHERE id = ?').run(id).changes > 0;
+  }
+
+  getCompanionDay(day = localDay()): CompanionDay {
+    const row = this.db
+      .prepare('SELECT day, callback_at, recap_at, recap_text FROM companion_days WHERE day = ?')
+      .get(day) as unknown as CompanionDayRow | undefined;
+    return toCompanionDay(row, day);
+  }
+
+  markCallback(day = localDay(), at = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO companion_days (day, callback_at) VALUES (?, ?)
+         ON CONFLICT(day) DO UPDATE SET callback_at = excluded.callback_at`,
+      )
+      .run(day, at);
+  }
+
+  markRecap(day = localDay(), text = '', at = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO companion_days (day, recap_at, recap_text) VALUES (?, ?, ?)
+         ON CONFLICT(day) DO UPDATE SET
+           recap_at = excluded.recap_at,
+           recap_text = excluded.recap_text`,
+      )
+      .run(day, at, text.slice(0, 200));
+  }
+
+  recordBubbleFeedback(eventType: string, action: 'dismiss' | 'open'): void {
+    const clean = eventType.trim().slice(0, 60) || 'unknown';
+    const now = Date.now();
+    this.db
+      .prepare('INSERT INTO feedback_events (event_type, action, created_at) VALUES (?, ?, ?)')
+      .run(clean, action, now);
+
+    if (action === 'open') {
+      // 用户点开说明有兴趣：清掉同类抑制。
+      this.db
+        .prepare(
+          `INSERT INTO feedback_mutes (event_type, muted_until, dismiss_count, updated_at)
+           VALUES (?, 0, 0, ?)
+           ON CONFLICT(event_type) DO UPDATE SET
+             muted_until = 0,
+             dismiss_count = 0,
+             updated_at = excluded.updated_at`,
+        )
+        .run(clean, now);
+      return;
+    }
+
+    const row = this.db
+      .prepare(
+        'SELECT event_type, muted_until, dismiss_count, updated_at FROM feedback_mutes WHERE event_type = ?',
+      )
+      .get(clean) as unknown as FeedbackMuteRow | undefined;
+    const count = (row?.dismiss_count ?? 0) + 1;
+    const mutedUntil = count >= 2 ? now + 7 * 24 * 60 * 60_000 : 0;
+    this.db
+      .prepare(
+        `INSERT INTO feedback_mutes (event_type, muted_until, dismiss_count, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(event_type) DO UPDATE SET
+           muted_until = excluded.muted_until,
+           dismiss_count = excluded.dismiss_count,
+           updated_at = excluded.updated_at`,
+      )
+      .run(clean, mutedUntil, count, now);
+  }
+
+  isEventMuted(eventType: string): boolean {
+    const row = this.db
+      .prepare('SELECT muted_until FROM feedback_mutes WHERE event_type = ? LIMIT 1')
+      .get(eventType.trim().slice(0, 60)) as { muted_until?: number } | undefined;
+    return Boolean(row?.muted_until && Number(row.muted_until) > Date.now());
+  }
+
+  getCompanionDays(limit = 365): CompanionDay[] {
+    const rows = this.db
+      .prepare(
+        `SELECT day, callback_at, recap_at, recap_text
+         FROM companion_days ORDER BY day DESC LIMIT ?`,
+      )
+      .all(Math.max(1, limit)) as unknown as CompanionDayRow[];
+    return rows.map((row) => toCompanionDay(row, row.day));
+  }
+
+  exportData(): MemoryExport {
+    return {
+      exportedAt: Date.now(),
+      facts: this.getFacts(1000),
+      anchors: this.getAnchors(undefined, 1000),
+      commitments: this.getCommitments('all', 1000),
+      companionDays: this.getCompanionDays(1000),
+    };
+  }
+
+  getCompanionToday(now = new Date()): CompanionToday {
+    const day = localDay(now);
+    const record = this.getCompanionDay(day);
+    return {
+      day,
+      anchors: this.getAnchors(day, 20),
+      // 未完成的承诺一直保留；已完成的只显示最近三天，避免“今天”里堆旧账。
+      commitments: this.getCommitments('all', 20).filter(
+        (item) => item.status === 'open' || now.getTime() - item.at <= 3 * 24 * 60 * 60_000,
+      ),
+      callbackAt: record.callbackAt,
+      recapAt: record.recapAt,
+      recapText: record.recapText,
+    };
+  }
+
   clear(): void {
-    this.db.exec('DELETE FROM facts; DELETE FROM messages;');
+    this.db.exec('DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; DELETE FROM feedback_mutes;');
     this.secureFiles();
   }
 
