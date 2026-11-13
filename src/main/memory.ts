@@ -51,6 +51,58 @@ const KIND_LABEL: Record<MemoryKind, string> = {
   fact: '事实',
 };
 
+export interface ActivityObservationInput {
+  at: number;
+  app?: string;
+  title?: string;
+  activity: string;
+  displayNames?: string[];
+  confidence?: number;
+  captureKind?: string;
+}
+
+export interface ActivityCorrectionInput {
+  startAt: number;
+  endAt: number;
+  wrongText?: string;
+  correctedText: string;
+  confidence?: number;
+}
+
+interface ObservationRow {
+  at: number;
+  app: string | null;
+  title: string | null;
+  activity: string;
+  display_names: string | null;
+  confidence: number | null;
+  capture_kind: string | null;
+}
+
+interface CorrectionRow {
+  id: string;
+  created_at: number;
+  start_at: number;
+  end_at: number;
+  wrong_text: string | null;
+  corrected_text: string;
+  confidence: number;
+}
+
+interface TimelineSegment {
+  start: number;
+  end: number;
+  app: string;
+  title: string;
+  activity: string;
+  corrected: boolean;
+}
+
+function formatHourMinute(value: number): string {
+  const date = new Date(value);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
 function clampTime(value: unknown, fallback: string): string {
   const text = typeof value === 'string' ? value.trim() : '';
   const match = /^(\d{1,2}):(\d{2})$/.exec(text);
@@ -359,6 +411,28 @@ export class MemoryStore {
         recap_at INTEGER,
         recap_text TEXT
       );
+      CREATE TABLE IF NOT EXISTS activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        app TEXT,
+        title TEXT,
+        activity TEXT NOT NULL,
+        display_names TEXT,
+        confidence REAL,
+        capture_kind TEXT
+      );
+      CREATE INDEX IF NOT EXISTS activity_log_at ON activity_log(at);
+      CREATE TABLE IF NOT EXISTS activity_corrections (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        start_at INTEGER NOT NULL,
+        end_at INTEGER NOT NULL,
+        wrong_text TEXT,
+        corrected_text TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS activity_corrections_range ON activity_corrections(start_at, end_at);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
         text,
         content='facts',
@@ -1042,8 +1116,181 @@ export class MemoryStore {
     };
   }
 
+  appendObservation(input: ActivityObservationInput): void {
+    const activity = normalize(input.activity);
+    if (!activity) return;
+    const at = Number(input.at) || Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO activity_log
+           (at, app, title, activity, display_names, confidence, capture_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        at,
+        normalize(input.app ?? '').slice(0, 160) || null,
+        normalize(input.title ?? '').slice(0, 240) || null,
+        activity,
+        JSON.stringify((input.displayNames ?? []).slice(0, 4)),
+        Math.min(1, Math.max(0, Number(input.confidence) || 0)),
+        input.captureKind ?? null,
+      );
+
+    const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+    this.db.prepare('DELETE FROM activity_log WHERE at < ?').run(cutoff);
+    this.db.exec(`
+      DELETE FROM activity_log
+      WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT 2000)
+    `);
+  }
+
+  addCorrection(input: ActivityCorrectionInput): string | null {
+    const corrected = normalize(input.correctedText);
+    if (!corrected) return null;
+    const startAt = Number(input.startAt);
+    const endAt = Number(input.endAt);
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt < startAt) return null;
+
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO activity_corrections
+           (id, created_at, start_at, end_at, wrong_text, corrected_text, confidence)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        Date.now(),
+        Math.round(startAt),
+        Math.round(endAt),
+        normalize(input.wrongText ?? '').slice(0, 240) || null,
+        corrected,
+        Math.min(1, Math.max(0, Number(input.confidence) || 1)),
+      );
+
+    this.db.exec(`
+      DELETE FROM activity_corrections
+      WHERE id NOT IN (
+        SELECT id FROM activity_corrections ORDER BY created_at DESC LIMIT 500
+      )
+    `);
+    return id;
+  }
+
+  private getCorrectionsSince(since: number): CorrectionRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, created_at, start_at, end_at, wrong_text, corrected_text, confidence
+         FROM activity_corrections
+         WHERE end_at >= ?
+         ORDER BY start_at ASC`,
+      )
+      .all(since) as unknown as CorrectionRow[];
+  }
+
+  getActivityContext(minutes = 120, limit = 30): string {
+    const windowMinutes = Math.min(24 * 60, Math.max(5, Math.round(minutes)));
+    const since = Date.now() - windowMinutes * 60_000;
+    const corrections = this.getCorrectionsSince(since);
+    const rows = this.db
+      .prepare(
+        `SELECT at, app, title, activity, display_names, confidence, capture_kind
+         FROM activity_log
+         WHERE at >= ?
+         ORDER BY at ASC
+         LIMIT 1000`,
+      )
+      .all(since) as unknown as ObservationRow[];
+
+    const segments: TimelineSegment[] = [];
+    for (const row of rows) {
+      const matching = corrections
+        .filter(
+          (correction) => correction.start_at <= row.at && correction.end_at >= row.at,
+        )
+        .sort((a, b) => b.created_at - a.created_at)[0];
+      const activity = matching?.corrected_text ?? row.activity;
+      const app = row.app ?? '';
+      const title = row.title ?? '';
+      const last = segments[segments.length - 1];
+      if (
+        last &&
+        last.activity === activity &&
+        last.app === app &&
+        last.title === title &&
+        row.at - last.end <= 5 * 60_000
+      ) {
+        last.end = row.at;
+      } else {
+        segments.push({
+          start: row.at,
+          end: row.at,
+          app,
+          title,
+          activity,
+          corrected: Boolean(matching),
+        });
+      }
+    }
+
+    for (const correction of corrections) {
+      const covered = rows.some(
+        (row) => row.at >= correction.start_at && row.at <= correction.end_at,
+      );
+      if (covered) continue;
+      segments.push({
+        start: correction.start_at,
+        end: correction.end_at,
+        app: '',
+        title: '',
+        activity: correction.corrected_text,
+        corrected: true,
+      });
+    }
+
+    segments.sort((a, b) => a.start - b.start);
+    const visible = segments.slice(-Math.max(1, limit));
+    const lines = visible.map((segment) => {
+      const end = Math.max(segment.end, segment.start + 60_000);
+      const label = [segment.app, segment.title].filter(Boolean).join(' / ').slice(0, 60);
+      return `- ${formatHourMinute(segment.start)}-${formatHourMinute(end)} ${
+        label ? `${label}：` : ''
+      }${segment.activity.slice(0, 100)}${segment.corrected ? '（用户纠正）' : ''}`;
+    });
+    if (segments.length > visible.length) lines.unshift('…（更早的记录已省略）');
+    return lines.join('\n').slice(0, 2400);
+  }
+
+  getRecentCorrectionContext(limit = 5): string {
+    const rows = this.db
+      .prepare(
+        `SELECT id, created_at, start_at, end_at, wrong_text, corrected_text, confidence
+         FROM activity_corrections
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, limit)) as unknown as CorrectionRow[];
+    return rows
+      .reverse()
+      .map((row) => {
+        const wrong = row.wrong_text
+          ? `（不是「${row.wrong_text.replace(/\s+/g, ' ').slice(0, 60)}」）`
+          : '';
+        return `- ${formatHourMinute(row.start_at)}-${formatHourMinute(row.end_at)} 用户纠正：${row.corrected_text}${wrong}`;
+      })
+      .join('\n')
+      .slice(0, 1600);
+  }
+
+  getCorrectionCount(): number {
+    return Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM activity_corrections').get() as { count: number })
+        .count,
+    );
+  }
+
   clear(): void {
-    this.db.exec('DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; DELETE FROM feedback_mutes;');
+    this.db.exec('DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; DELETE FROM feedback_mutes; DELETE FROM activity_log; DELETE FROM activity_corrections;');
     this.secureFiles();
   }
 

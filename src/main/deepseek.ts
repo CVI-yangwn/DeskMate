@@ -81,6 +81,18 @@ const memoryExtractionSchema = z.object({
 });
 
 
+const correctionExtractionSchema = z.object({
+  correctedActivity: z.string().max(200).default(''),
+  minutes: z
+    .preprocess((value) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : 30;
+    }, z.number().min(1).max(720))
+    .default(30),
+  timeHint: z.string().max(40).default(''),
+  confidence: scoreSchema,
+});
+
 const companionSignalSchema = z.object({
   facts: z
     .array(
@@ -175,6 +187,13 @@ export interface CompanionAnchorCandidate {
 export interface CompanionCommitmentCandidate {
   text: string;
   dueHint?: string;
+  confidence: number;
+}
+
+export interface CorrectionCandidate {
+  correctedActivity: string;
+  minutes: number;
+  timeHint?: string;
   confidence: number;
 }
 
@@ -533,6 +552,56 @@ ${assistantReply}
       }));
   }
 
+
+  async extractCorrection(
+    userMessage: string,
+    previousAnswer: string,
+  ): Promise<CorrectionCandidate | null> {
+    const data = await this.post({
+      model: this.env.model,
+      thinking: { type: 'disabled' },
+      response_format: { type: 'json_object' },
+      max_tokens: 240,
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content: `你是“纠正提取器”。用户正在纠正你对“他刚才在做什么”的判断。
+
+提取：
+- correctedActivity：用户说自己（刚才/那段时间）在做什么，简洁中文，最多 60 字
+- minutes：这条纠正覆盖最近多少分钟；根据“刚才/过去半小时/上午/那会”等推断，默认 30，范围 1–720
+- timeHint：用户原话里的时间词，没有就空字符串
+- confidence：0–1
+
+只输出 JSON：{"correctedActivity":"...","minutes":30,"timeHint":"...","confidence":0.0}
+如果用户没有说自己做了什么，correctedActivity 留空。不要编造。`,
+        },
+        {
+          role: 'user',
+          content: `<previous_answer>\n${previousAnswer}\n</previous_answer>\n\n<user_correction>\n${userMessage}\n</user_correction>`,
+        },
+      ],
+    });
+
+    const content = this.readContent(data);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return null;
+    }
+    const result = correctionExtractionSchema.safeParse(parsed);
+    if (!result.success) return null;
+    const correctedActivity = result.data.correctedActivity.trim().slice(0, 200);
+    if (!correctedActivity || result.data.confidence < 0.4) return null;
+    return {
+      correctedActivity,
+      minutes: result.data.minutes,
+      timeHint: result.data.timeHint || undefined,
+      confidence: result.data.confidence,
+    };
+  }
 
   async extractCompanionSignals(
     userMessage: string,

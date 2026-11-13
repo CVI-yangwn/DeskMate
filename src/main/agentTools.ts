@@ -38,6 +38,23 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'lookup_activity',
+      description:
+        '查询用户过去一段时间（分钟）的活动时间线。用户问“我刚才/过去一小时/上午在干嘛”时先调用；如果 <memory> 里的时间线不够再调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          minutes: {
+            type: 'number',
+            description: '回溯多少分钟，默认 60，最多 1440',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'scan_screen',
       description:
         '立即扫描当前屏幕，返回前台应用、窗口标题和用户正在做什么。只有需要最新屏幕上下文时才调用，不要频繁调用。',

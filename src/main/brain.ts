@@ -41,6 +41,7 @@ import {
   type CompanionCommitmentCandidate,
   type MemoryCandidate,
 } from './deepseek';
+import { fallbackCorrection, isCorrectionCue } from './correction';
 import { getDeepSeekEnv } from './env';
 import { MemoryStore } from './memory';
 import { MockBrain } from './mockBrain';
@@ -678,6 +679,23 @@ export class BrainService {
 
     this.maybeAutoAnchors(previousTest, nextTest, analyzedAt);
 
+    const recordedActivity = this.state.activity?.trim();
+    if (
+      recordedActivity &&
+      recordedActivity !== INITIAL_STATE.activity &&
+      !/^（mock）/.test(recordedActivity)
+    ) {
+      this.memory.appendObservation({
+        at: analyzedAt,
+        app: this.state.app,
+        title: this.state.windowTitle,
+        activity: recordedActivity,
+        displayNames: this.state.displayNames,
+        confidence: this.state.confidence,
+        captureKind: this.state.captureKind,
+      });
+    }
+
     let planPayload: UtterancePayload | null = null;
     let event: string | null = null;
     const dnd = this.memory.getSettings().dnd;
@@ -1075,13 +1093,24 @@ export class BrainService {
             .join('；')}`
         : '',
     ].filter(Boolean);
+    const activityContext = this.memory.getActivityContext(120, 24);
+    const correctionContext = this.memory.getRecentCorrectionContext(5);
     const memoryText = `${
       autoMemoryEnabled
         ? '【自动记忆已开启：稳定的偏好/项目会自动保存，不需要询问用户是否记住。】\n'
         : '【自动记忆已关闭：不要主动保存普通陈述，也不要声称记住了；只有用户明确要求时才可调用 remember。】\n'
     }${this.memory.getContext(message, 12)}${
       companionLines.length ? `\n${companionLines.join('\n')}` : ''
+    }${activityContext ? `\n\n【最近活动时间线（可回答“我刚才在干嘛”）】\n${activityContext}` : ''}${
+      correctionContext ? `\n\n【用户纠正过的事实，优先于上面的时间线】\n${correctionContext}` : ''
     }`;
+    const correction = await this.handleCorrection(message, history);
+    if (correction) {
+      this.memory.appendMessage('user', message);
+      this.memory.appendMessage('assistant', correction.text);
+      this.emit();
+      return correction;
+    }
     let replyText = '';
     let source: 'deepseek' | 'mock' = 'mock';
     let rememberedByTool = false;
@@ -1169,6 +1198,71 @@ export class BrainService {
     }
 
     return { text: replyText, source };
+  }
+
+  private async handleCorrection(
+    message: string,
+    history: ChatMessage[],
+  ): Promise<ChatReply | null> {
+    if (!isCorrectionCue(message)) return null;
+
+    const previous = [...history]
+      .reverse()
+      .find((item) => item.role === 'assistant')?.text ?? '';
+    let corrected: { correctedActivity: string; minutes: number; confidence: number } | null = null;
+    let source: 'deepseek' | 'mock' = 'mock';
+
+    if (this.shouldTryApi()) {
+      try {
+        const candidate = await this.client.extractCorrection(message, previous);
+        if (candidate?.correctedActivity) {
+          corrected = candidate;
+          source = 'deepseek';
+          if (this.apiStatus !== 'ok') {
+            this.apiStatus = 'ok';
+            this.apiMessage = 'DeepSeek 连接正常';
+          }
+        }
+      } catch (error) {
+        this.noteApiError(error);
+      }
+    }
+
+    if (!corrected) {
+      const local = fallbackCorrection(message);
+      if (local) corrected = { ...local, confidence: 0.65 };
+    }
+
+    if (!corrected?.correctedActivity) {
+      return {
+        text: '哪里不对？你把正确的那段活动告诉我，我记下来。',
+        source,
+      };
+    }
+
+    const now = Date.now();
+    const minutes = Math.min(720, Math.max(5, Math.round(corrected.minutes || 30)));
+    const correctedActivity = corrected.correctedActivity
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 180);
+    this.memory.addCorrection({
+      startAt: now - minutes * 60_000,
+      endAt: now,
+      wrongText: previous.slice(0, 240),
+      correctedText: correctedActivity,
+      confidence: corrected.confidence ?? 0.8,
+    });
+
+    const windowLabel =
+      minutes >= 60 ? `过去 ${Math.round(minutes / 60)} 小时` : `刚才 ${minutes} 分钟`;
+    const wrong = previous.trim()
+      ? `，不是「${previous.replace(/\s+/g, ' ').slice(0, 40)}」`
+      : '';
+    return {
+      text: `明白了：${windowLabel}你是在「${correctedActivity}」${wrong}。这条纠正我记下了，之后回答“刚才在干嘛”会优先用它。`,
+      source,
+    };
   }
 
   private async extractCompanionSignals(
@@ -1259,6 +1353,17 @@ export class BrainService {
       case 'search_memory': {
         const query = typeof args.query === 'string' ? args.query : '';
         return { facts: this.memory.search(query, 10) };
+      }
+      case 'lookup_activity': {
+        const minutes = Math.min(
+          24 * 60,
+          Math.max(5, Math.round(Number(args.minutes) || 60)),
+        );
+        const timeline = this.memory.getActivityContext(minutes, 40);
+        return {
+          minutes,
+          timeline: timeline || '没有这段时间的活动记录。',
+        };
       }
       case 'scan_screen': {
         const result = await this.scanScreen(false);

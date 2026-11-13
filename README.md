@@ -106,7 +106,9 @@ npm run check:model
 - **声音与人格**：设置里可选 macOS `say` 音色、语速，并写自己的 persona（称呼/语气/边界/绝对不说）；
 - **记忆导出**：长期记忆、锚点、承诺、日结可导出为 JSON 或 Markdown；
 - **自动记忆**：可开关；稳定的偏好/项目会从聊天中自动沉淀，相似记忆自动合并；关闭后只有明确说“记住”才写入；
-- **工具调用**：`remember`、`search_memory`、`scan_screen`、`set_dnd`；
+- **活动时间线**：每次扫描把应用、窗口、活动写进 SQLite（保留 7 天）；问“我刚才/过去一小时在干嘛”时会带最近 2 小时时间线，也可以用 `lookup_activity` 查更久；
+- **自我纠正**：当你说“不对，我刚才在写周报”时，系统提取正确活动和覆盖时间并写入纠正表；之后回答“刚才在干嘛”会优先使用纠正后的版本；
+- **工具调用**：`remember`、`search_memory`、`lookup_activity`、`scan_screen`、`set_dnd`；
 - **勿扰与主动策略**：启动先打招呼；手动扫描一定给气泡反馈；普通观察同一活动 10 分钟内不重复，活动刚变化至少隔 3 分钟；离开 10 分钟回来会欢迎；连续专注 25 分钟或空闲 10 分钟也会主动关注；空闲/锁屏会重置专注计时；
 - **扫描当前屏幕**：抓所有显示器的整屏（聚焦屏优先）→ 每块屏跑 macOS Vision 本地 OCR → 把多张图一起发给 `DeepSeek-V4-Flash-Vision-Exp` → 汇总更新活动/测试状态；任意屏出现隐私排除应用时自动退回到前台窗口截图；
 - **可信感知**：每次扫描都调用视觉模型；本地 OCR 作为证据和测试结果兜底，不再用它跳过 LLM；面板显示 OCR 行数、置信度、耗时、证据数和扫描/分析次数；
@@ -152,7 +154,8 @@ src/
 │  ├─ companion.ts           # 陪伴记忆：本地抽取、日期、早晚文案
 │  ├─ perception.ts          # 前台窗口 + 截图 + 空闲时间
 │  ├─ ocr.ts                 # 调 native/ocr
-│  ├─ memory.ts              # SQLite + FTS5 长期记忆
+│  ├─ memory.ts              # SQLite + FTS5 长期记忆 + 活动时间线/纠正
+│  ├─ correction.ts          # 自我纠正意图识别与本地解析
 │  ├─ deepseek.ts            # 文本 + 视觉 + JSON + tool calls
 │  ├─ mockBrain.ts           # 无 key/401 时的本地回退
 │  ├─ persona.ts             # 角色 prompt
@@ -173,6 +176,7 @@ scripts/
 ├─ dev.sh                    # 自动找 Node 后启动开发模式
 ├─ macos-setup.sh            # 安装、编译 OCR、检查、构建
 ├─ test-memory.mjs           # MemoryStore 单测（node:test）
+├─ test-correction.mjs       # 自我纠正解析单测
 ├─ test-event-bridge.mjs     # 事件桥校验单测
 ├─ test-companion.mjs        # 陪伴记忆本地抽取单测
 ├─ check-live2d-model.mjs    # 校验 model3.json 引用文件

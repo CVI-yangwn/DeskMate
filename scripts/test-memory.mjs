@@ -172,3 +172,50 @@ test('voice, persona and quiet hours are persisted with clamps', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('activity timeline applies user corrections', () => {
+  const { dir, store } = createStore();
+  try {
+    const now = Date.now();
+    store.appendObservation({
+      at: now - 20 * 60_000,
+      app: 'Visual Studio Code',
+      title: 'auth.spec.ts',
+      activity: '在排查 auth 的 race condition',
+    });
+    store.appendObservation({
+      at: now - 15 * 60_000,
+      app: 'Visual Studio Code',
+      title: 'auth.spec.ts',
+      activity: '在排查 auth 的 race condition',
+    });
+    assert.match(store.getActivityContext(30), /排查 auth/);
+
+    store.addCorrection({
+      startAt: now - 25 * 60_000,
+      endAt: now,
+      wrongText: '在排查 auth 的 race condition',
+      correctedText: '在写周报',
+      confidence: 1,
+    });
+    store.addCorrection({
+      startAt: now - 50 * 60_000,
+      endAt: now - 40 * 60_000,
+      correctedText: '在开会',
+      confidence: 0.9,
+    });
+
+    const context = store.getActivityContext(60);
+    assert.match(context, /在写周报/);
+    assert.match(context, /在开会/);
+    assert.doesNotMatch(context, /排查 auth/);
+    assert.equal(store.getCorrectionCount(), 2);
+    assert.match(store.getRecentCorrectionContext(), /用户纠正：在写周报/);
+
+    store.clear();
+    assert.equal(store.getActivityContext(60), '');
+    assert.equal(store.getCorrectionCount(), 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
