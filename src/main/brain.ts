@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { app } from 'electron';
+import { app, screen } from 'electron';
 import type {
   AnchorKind,
   ApiStatus,
@@ -47,7 +47,8 @@ import { MockBrain } from './mockBrain';
 import { runOcr } from './ocr';
 import {
   captureActiveWindow,
-  captureFocusedDisplay,
+  captureAllDisplays,
+  type CapturedFrame,
   displayForWindow,
   getIdleSeconds,
   getScreenStatus,
@@ -515,17 +516,26 @@ export class BrainService {
 
     const display = displayForWindow(active);
     const visibleWindows = await readOpenWindows();
-    // 整屏截图可能把同屏的隐私应用也拍进去；只要发现，就退回到前台窗口截图。
+    const allDisplays = screen.getAllDisplays();
+    // 任意一块屏上出现隐私应用时，整屏截图退回到前台窗口，避免把隐私内容拍进去。
     const privacyFallback = visibleWindows.some((win) => {
-      if (!win.bounds || win.app === active?.app) return false;
-      return rectsIntersect(win.bounds, display.bounds) && this.isAppExcluded(win.app);
+      if (!win.bounds || win.app === active?.app || !this.isAppExcluded(win.app)) return false;
+      return allDisplays.some((item) => rectsIntersect(win.bounds!, item.bounds));
     });
 
-    let captured = privacyFallback
-      ? await captureActiveWindow(1280)
-      : await captureFocusedDisplay(active, 1280);
-    if (!captured && active) captured = await captureActiveWindow(1280);
-    if (captured && this.isAppExcluded(captured.app)) captured = null;
+    let frames: CapturedFrame[] = privacyFallback
+      ? []
+      : await captureAllDisplays(active, 1280);
+    if (privacyFallback) {
+      const single = await captureActiveWindow(1280);
+      if (single) frames = [single];
+    }
+    if (frames.length === 0 && active) {
+      const single = await captureActiveWindow(1280);
+      if (single) frames = [single];
+    }
+    frames = frames.filter((frame) => !this.isAppExcluded(frame.app));
+    const captured = frames[0] ?? null;
 
     if (!captured) {
       this.state = {
@@ -556,8 +566,17 @@ export class BrainService {
       };
     }
 
-    const ocr = await runOcr(captured.base64);
-    const ocrTest = detectOcrTest(ocr?.text);
+    const ocrResults = await Promise.all(frames.map((frame) => runOcr(frame.base64)));
+    const ocrText = ocrResults
+      .map((result, index) =>
+        result
+          ? `【${frames[index].displayName ?? `显示器 ${index + 1}`}】\n${result.text}`
+          : '',
+      )
+      .filter(Boolean)
+      .join('\n\n');
+    const ocrLines = ocrResults.reduce((sum, result) => sum + (result?.lines.length ?? 0), 0);
+    const ocrTest = detectOcrTest(ocrText);
 
     let inspection: Inspection;
     let source: 'deepseek' | 'mock' = 'mock';
@@ -565,12 +584,15 @@ export class BrainService {
     if (this.shouldTryApi()) {
       this.noteVisionCall();
       try {
-        inspection = await this.client.inspectScreenshot(
-          captured.base64,
+        inspection = await this.client.inspectScreens(
+          frames.map((frame, index) => ({
+            base64: frame.base64,
+            label: frame.displayName ?? `显示器 ${index + 1}`,
+          })),
           captured.app,
           captured.title,
           'low',
-          ocr?.text,
+          ocrText,
         );
         source = 'deepseek';
         if (this.apiStatus !== 'ok') {
@@ -578,6 +600,10 @@ export class BrainService {
           this.apiMessage = 'DeepSeek 连接正常';
         }
       } catch (error) {
+        console.warn(
+          '视觉分析失败',
+          error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
+        );
         this.noteApiError(error);
         const fallback = this.mock.inspectScreenshot(captured.app, captured.title);
         inspection = {
@@ -597,22 +623,25 @@ export class BrainService {
     }
 
     const evidence = [...inspection.evidence];
-    if (ocr?.lines.length) {
-      const preview = ocr.lines
-        .filter((line) => line.confidence >= 0.5)
-        .slice(0, 3)
-        .map((line) => line.text)
-        .join(' | ')
-        .slice(0, 180);
-      if (preview) evidence.push(`OCR: ${preview}`);
-    }
+    const ocrPreview = ocrResults
+      .flatMap((result) => result?.lines ?? [])
+      .filter((line) => line.confidence >= 0.5)
+      .slice(0, 3)
+      .map((line) => line.text)
+      .join(' | ')
+      .slice(0, 220);
+    if (ocrPreview) evidence.push(`OCR: ${ocrPreview}`);
 
     evidence.push(
-      captured.captureKind === 'display'
-        ? `截图范围：整屏${captured.displayName ? `（${captured.displayName}）` : ''}`
-        : privacyFallback
-          ? '截图范围：同屏有隐私应用，退回前台窗口'
-          : '截图范围：前台窗口',
+      frames.length > 1
+        ? `截图范围：${frames.length} 块显示器（${frames
+            .map((frame, index) => frame.displayName ?? `显示器 ${index + 1}`)
+            .join(' + ')}）`
+        : captured.captureKind === 'display'
+          ? `截图范围：整屏${captured.displayName ? `（${captured.displayName}）` : ''}`
+          : privacyFallback
+            ? '截图范围：同屏有隐私应用，退回前台窗口'
+            : '截图范围：前台窗口',
     );
 
     const previousTest = this.state.testResult;
@@ -635,7 +664,11 @@ export class BrainService {
       lastAnalyzedAt: analyzedAt,
       confidence: inspection.confidence,
       scanDurationMs: analyzedAt - started,
-      ocrLines: ocr?.lines.length ?? 0,
+      ocrLines,
+      displayCount: frames.length,
+      displayNames: frames
+        .map((frame) => frame.displayName)
+        .filter((name): name is string => Boolean(name)),
       lastUpdated: analyzedAt,
       captureKind: captured.captureKind,
       displayName: captured.displayName,
@@ -735,8 +768,8 @@ export class BrainService {
         ? '已主动关注当前状态。'
         : source === 'mock'
           ? '已截图，但视觉模型不可用，已用本地 OCR 兜底。'
-          : ocr?.lines.length
-            ? `已扫描（视觉 + 本地 OCR ${ocr.lines.length} 行）。`
+          : ocrLines > 0
+            ? `已扫描（视觉 + 本地 OCR ${ocrLines} 行）。`
             : '已扫描。',
       changed: true,
       durationMs: analyzedAt - started,

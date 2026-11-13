@@ -253,6 +253,33 @@ export async function captureFocusedDisplay(
   }
 }
 
+export async function captureAllDisplays(
+  active: ActiveWindowInfo | null,
+  maxWidth = 1280,
+): Promise<CapturedFrame[]> {
+  if (getScreenStatus() === 'denied' || getScreenStatus() === 'restricted') {
+    return [];
+  }
+
+  const activeDisplay = displayForWindow(active);
+  const displays = screen.getAllDisplays();
+  const ordered = [
+    activeDisplay,
+    ...displays.filter((display) => display.id !== activeDisplay.id),
+  ];
+
+  const frames: CapturedFrame[] = [];
+  for (const display of ordered) {
+    try {
+      const frame = await captureDisplay(display, active, maxWidth);
+      if (frame) frames.push(frame);
+    } catch {
+      // try the remaining displays
+    }
+  }
+  return frames;
+}
+
 export async function captureActiveWindow(maxWidth = 1280): Promise<CapturedFrame | null> {
   if (getScreenStatus() === 'denied' || getScreenStatus() === 'restricted') {
     return null;

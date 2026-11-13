@@ -248,7 +248,7 @@ async function scanAndBroadcast(interactive = false) {
   }
   lastForegroundKey = `${result.state.app ?? ''}|${result.state.windowTitle ?? ''}`;
   console.info(
-    `[scan] ${result.changed ? 'changed' : 'cached'} source=${result.source} ${result.durationMs}ms capture=${result.state.captureKind ?? 'window'}`,
+    `[scan] ${result.changed ? 'changed' : 'cached'} source=${result.source} ${result.durationMs}ms capture=${result.state.captureKind ?? 'window'} displays=${result.state.displayCount ?? 1}`,
   );
   sendToAll('status:changed', brain.getStatus());
   return result;

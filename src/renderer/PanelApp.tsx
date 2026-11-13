@@ -715,7 +715,9 @@ export default function PanelApp() {
   const evidenceCount = state?.evidence?.length ?? 0;
   const captureLabel =
     state?.captureKind === 'display'
-      ? `整屏${state.displayName ? ` · ${state.displayName}` : ''}`
+      ? state.displayCount && state.displayCount > 1
+        ? `整屏 ×${state.displayCount}`
+        : `整屏${state.displayName ? ` · ${state.displayName}` : ''}`
       : state?.captureKind === 'window'
         ? '前台窗口'
         : '';
@@ -813,7 +815,11 @@ export default function PanelApp() {
           <details className="context-insight diagnostics" title={state?.evidence?.join('\n') || undefined}>
             <summary>诊断</summary>
             <div className="diagnostics-grid">
-              {captureLabel && <span className="capture-chip">{captureLabel}</span>}
+              {captureLabel && (
+              <span className="capture-chip" title={state?.displayNames?.join(' / ') || undefined}>
+                {captureLabel}
+              </span>
+            )}
               {noForeground && <span className="stale-text">未读前台应用</span>}
               <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
               <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>

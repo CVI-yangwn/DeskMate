@@ -41,6 +41,8 @@ export interface DemoState {
   ocrLines?: number;
   captureKind?: 'display' | 'window';
   displayName?: string;
+  displayCount?: number;
+  displayNames?: string[];
   evidence?: string[];
 }
 
