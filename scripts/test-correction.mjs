@@ -9,6 +9,8 @@ test('correction cues distinguish questions from corrections', () => {
   assert.equal(isCorrectionCue('你答错了，我刚才在写周报'), true);
   assert.equal(isCorrectionCue('不对，我那段时间在开会'), true);
   assert.equal(isCorrectionCue('不是看代码，是在写周报'), true);
+  assert.equal(isCorrectionCue('我刚才在写周报，不是看代码'), true);
+  assert.equal(isCorrectionCue('我不是很确定'), false);
 });
 
 test('fallback correction extracts activity and time window', () => {
@@ -20,6 +22,7 @@ test('fallback correction extracts activity and time window', () => {
   });
   assert.equal(fallbackCorrection('不对，我那段时间在开会')?.correctedActivity, '开会');
   assert.equal(fallbackCorrection('不是看代码，是在写周报')?.correctedActivity, '写周报');
+  assert.equal(fallbackCorrection('我刚才在写周报，不是看代码')?.correctedActivity, '写周报');
   assert.deepEqual(fallbackCorrection('你记错了，我刚才在跟产品过需求，大概过去20分钟'), {
     correctedActivity: '跟产品过需求',
     minutes: 20,

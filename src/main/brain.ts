@@ -683,7 +683,8 @@ export class BrainService {
     if (
       recordedActivity &&
       recordedActivity !== INITIAL_STATE.activity &&
-      !/^（mock）/.test(recordedActivity)
+      !/^（mock）/.test(recordedActivity) &&
+      !/暂时看不清|屏幕已锁定|已跳过隐私/.test(recordedActivity)
     ) {
       this.memory.appendObservation({
         at: analyzedAt,

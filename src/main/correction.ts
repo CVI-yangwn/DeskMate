@@ -7,8 +7,9 @@ export interface CorrectionHint {
 const QUESTION_PREFIX = /^(对不对|是不是|好不好|行不行|能不能|可以吗)/;
 const ACTIVITY_CONTEXT = /(我|刚才|那会|这段时间|刚才那|在干嘛|在做什么|在忙|活动|屏幕)/;
 const STRONG_CUE =
-  /(答错|说错|搞错|记错|纠正|更正|不是这样|说得不对|说的不对|讲得不对|不对[，,。！!\s]|其实我|实际上我)/;
+  /(答错|答得不对|答的不对|说错|说得不对|说的不对|讲得不对|搞错|记错|纠正|更正|不是这样|不对[，,。！!\s]|其实我|实际上我|错了|错的)/;
 const CONTRAST = /不是.{0,40}?(?:而是|是)/s;
+const DENIAL = /(?:不是|并不是).{0,20}(?:在|看|写|做|弄|改|查|开会|代码|屏幕|工作)/;
 
 /**
  * 只在“看起来确实在纠正过去的观察”时返回 true。
@@ -20,7 +21,7 @@ export function isCorrectionCue(message: string): boolean {
   if (CONTRAST.test(text) && /(我|刚才|那会|这段时间|在|代码|周报|开会|屏幕)/.test(text)) {
     return true;
   }
-  return ACTIVITY_CONTEXT.test(text) && STRONG_CUE.test(text);
+  return ACTIVITY_CONTEXT.test(text) && (STRONG_CUE.test(text) || DENIAL.test(text));
 }
 
 function clampMinutes(value: number): number {
@@ -70,6 +71,7 @@ export function fallbackCorrection(message: string): CorrectionHint | null {
       '',
     )
     .replace(/^[：:，,\s]+/, '')
+    .replace(/[，,]\s*(?:而)?不是.*$/, '')
     .replace(/[，,]\s*(?:大概|大约|差不多)?\s*(?:过去|最近)?\s*\d+\s*(?:分钟|小时).*$/, '')
     .replace(/[。！？!?]+$/, '')
     .trim();
