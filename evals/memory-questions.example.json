@@ -1,0 +1,7 @@
+[
+  { "question": "DeskMate 现在卡在哪？", "goldPage": "DeskMate" },
+  { "question": "上次关于语音的方案决定是什么？", "goldPage": "语音方案" },
+  { "question": "我答应过谁要在什么时候之前给东西？", "goldPage": "" },
+  { "question": "那个客户现在还需要什么？", "goldPage": "" },
+  { "question": "我有没有说过要用 Postgres？", "goldPage": "" }
+]

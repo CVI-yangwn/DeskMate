@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { MemoryStore } from '../src/main/memory.ts';
-import { runDreaming, wikiDirectory } from '../src/main/dreaming.ts';
+import { runDreaming } from '../src/main/dreaming.ts';
+import { wikiDirectory } from '../src/main/wiki.ts';
 import { applyWikiDraft } from '../src/main/wiki.ts';
 
 function createStore() {

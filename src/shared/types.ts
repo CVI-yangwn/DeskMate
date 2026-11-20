@@ -184,6 +184,8 @@ export interface WikiItem {
 export interface WikiSource {
   ref: string;
   label: string;
+  /** 写入时的 200–300 字快照：原行被保留策略裁掉后仍能解释这条记忆。 */
+  excerpt?: string;
   at: number;
 }
 
@@ -277,6 +279,19 @@ export interface SkillInfo {
   path: string;
 }
 
+export interface MemoryHealth {
+  pages: number;
+  unsourcedPages: number;
+  prunedSources: number;
+  stalePages: number;
+  duplicateOpenItems: number;
+  messages: number;
+  activityRows: number;
+  oldestActivityAt?: number;
+  injectionChars: number;
+  checkedAt: number;
+}
+
 export interface KnowledgeView {
   pages: WikiPage[];
   rules: ProactiveRule[];
@@ -284,6 +299,7 @@ export interface KnowledgeView {
   reports: DailyReport[];
   skills: SkillInfo[];
   agentSummary: string;
+  health: MemoryHealth;
   lastRun: DreamRun | null;
   dreamingEnabled: boolean;
   dreamingAt: string;

@@ -94,9 +94,9 @@ import {
   sanitizeRuleDraft,
 } from './proactiveRules';
 import { SkillRegistry } from './skills';
-import { runDreaming, wikiDirectory } from './dreaming';
+import { runDreaming } from './dreaming';
 import { speakWithSay } from './tts';
-import { formatWikiPage } from './wiki';
+import { formatWikiPage, wikiDirectory } from './wiki';
 
 const SPEECH_COOLDOWN_MS = 2 * 60_000;
 
@@ -280,6 +280,8 @@ export class BrainService {
     const settings = this.memory.getSettings();
     const wikiDir = wikiDirectory(app.getPath('userData'));
     fs.mkdirSync(wikiDir, { recursive: true });
+    const health = this.memory.getMemoryHealth();
+    health.injectionChars = this.knowledgeContext('').length;
     return {
       pages: this.memory.listWikiPages(200),
       rules: this.memory.getRules(),
@@ -287,6 +289,7 @@ export class BrainService {
       reports: this.memory.getDailyReports(14),
       skills: this.skills.info(),
       agentSummary: this.memory.getAgentMemory(),
+      health,
       lastRun: this.memory.getLastDreamRun(),
       dreamingEnabled: settings.autoDream,
       dreamingAt: settings.dreamingAt,
@@ -1767,9 +1770,6 @@ export class BrainService {
     const summary = this.memory.getAgentMemory();
     if (summary.trim()) parts.push(`【关于你（每晚整理）】\n${summary.trim().slice(0, 1400)}`);
 
-    const wiki = this.memory.getWikiContext(query, 4);
-    if (wiki) parts.push(`【个人 wiki（长期知识，优先于零散记忆）】\n${wiki}`);
-
     const rules = this.memory
       .getRules(false)
       .slice(0, 8)
@@ -1784,6 +1784,9 @@ export class BrainService {
         `【可用技能（描述只在需要时看；匹配时先调用 use_skill 读取全文）】\n${skills}`,
       );
     }
+
+    const wiki = this.memory.getWikiContext(query, 4);
+    if (wiki) parts.push(`【个人 wiki（长期知识，优先于零散记忆）】\n${wiki}`);
     return parts.join('\n\n').slice(0, 4200);
   }
 
@@ -2144,7 +2147,7 @@ export class BrainService {
           .join('\n');
         const sources = page.sources
           .slice(0, 6)
-          .map((source) => `- ${source.label}`)
+          .map((source) => `- ${source.label}${source.excerpt ? `\n  ${source.excerpt}` : ''}`)
           .join('\n');
         const changes = page.changeLog
           .slice(0, 4)

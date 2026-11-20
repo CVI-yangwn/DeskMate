@@ -11,6 +11,7 @@
     "preview": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test scripts/test-*.mjs",
+    "eval:memory": "node --experimental-strip-types --no-warnings scripts/eval-memory.mjs --auto",
     "check:model": "node scripts/check-live2d-model.mjs assets/live2d/haru/Haru.model3.json",
     "demo:pass": "node scripts/send-test-event.mjs pass",
     "demo:fail": "node scripts/send-test-event.mjs fail"

@@ -8,7 +8,7 @@
 
 | 表 | 作用 |
 |---|---|
-| `wiki_pages` | 一页一个实体；`summary`、`items`（JSON）、`sources`（JSON）、`change_log`（JSON），`name_key UNIQUE` |
+| `wiki_pages` | 一页一个实体；`summary`、`items`（JSON）、`sources`（JSON，含 200–300 字 excerpt 快照）、`change_log`（JSON），`name_key UNIQUE` |
 | `proactive_rules` | 学到的提醒规则；`kind` + `decision` + 可选 `window_start/window_end`，`active` 可暂停 |
 | `proactive_clues` | 还没够格成为规则的观察；`seen` 累计 |
 | `proactive_deliveries` | 每次主动消息的账本：说了什么、是否被压住、用户反应 |
@@ -129,7 +129,16 @@ if (gate.decision !== 'allow') {
 └─ skills/         # 用户技能
 ```
 
-页面改名不会删旧文件；删除页面不删文件。需要的话手动清理。
+删除单个页面会 unlink 对应的 Markdown；改名后旧名字的文件会留下，需要的话手动清理。清空记忆会删表、删 `wiki/` 和 `agent-memory/`，并执行 `secure_delete` + `VACUUM`。
+
+### 隐私边界
+
+- OCR 原文和光标全文只在当轮内存/模型判断里用，**不写 SQLite**；`activity_log` 只留活动摘要。
+- 活动保留 7 天、按时间清理；messages 保留 7 天且最多 1000 条；投递记录 90 天；整理记录 180 天。
+- 证据送模前会做常见密钥/邮箱/手机号/证件/卡号脱敏；截图本身仍可能含敏感内容。
+- tombstone 只存页面名的 SHA-256，不存客户名。
+- 导出强制 0600，并提示不要放 iCloud/共享目录。
+- 没有 SQLCipher；Time Machine/APFS/iCloud 仍可能在应用外保留副本。
 
 ## 7. 手动验证
 
@@ -157,6 +166,7 @@ npm run build
 
 - 夜间整理会调用模型最多约 8 次；没有 key 时只做本地日结和项目页迁移。
 - 引用校验只保证“ref 存在”，还不保证“重写 summary 时保留了旧引用”；Linger 的 `removed_refs` 机制尚未实现。
-- 搜索是名称/别名/摘要/条目的加权匹配，没有 embedding。
+- 搜索是名称/别名/摘要/条目的加权匹配，没有 embedding；`npm run eval:memory --auto` 可用现有页面生成检索体检。
 - `dream_runs` 保留 180 天，`proactive_deliveries` 保留 90 天；旧记录会在写入时清理。
+- 知识页会显示“记忆健康”：无来源页、已过期来源、90 天未更新但还有未完成项、重复未完成项、注入字符数。
 - 规则只覆盖 DeskMate 已有的主动事件类型；用户说“邮件/日历”这类 DeskMate 看不到的来源，会落到 `any` 或当前事件，命中率有限。

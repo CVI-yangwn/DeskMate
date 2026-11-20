@@ -152,7 +152,9 @@ function PageCard({
               <span className="knowledge-sub-title">来源</span>
               <ul>
                 {page.sources.slice(0, 5).map((source) => (
-                  <li key={source.ref}>{source.label}</li>
+                  <li key={source.ref} title={source.excerpt || source.label}>
+                    {source.label}
+                  </li>
                 ))}
               </ul>
             </div>
@@ -270,6 +272,31 @@ export function KnowledgePanel({ lastDreamAt }: { lastDreamAt?: number }) {
 
       {run?.message && <p className="knowledge-run-message">{run.message}</p>}
       {error && <p className="knowledge-error">{error}</p>}
+
+      <div className="knowledge-health">
+        <div className="knowledge-health-head">
+          <span>记忆健康</span>
+          <time>{clock(view.health.checkedAt)}</time>
+        </div>
+        <div className="knowledge-health-grid">
+          <span>{view.health.pages} 页 wiki</span>
+          <span>{view.health.messages} 条对话</span>
+          <span>{view.health.activityRows} 条活动</span>
+          <span>注入 {view.health.injectionChars} 字</span>
+          {view.health.unsourcedPages > 0 && (
+            <span className="warn">{view.health.unsourcedPages} 页无来源</span>
+          )}
+          {view.health.prunedSources > 0 && (
+            <span className="warn">{view.health.prunedSources} 条来源已过期</span>
+          )}
+          {view.health.stalePages > 0 && (
+            <span className="warn">{view.health.stalePages} 页 90 天没更新</span>
+          )}
+          {view.health.duplicateOpenItems > 0 && (
+            <span className="warn">{view.health.duplicateOpenItems} 条重复未完成</span>
+          )}
+        </div>
+      </div>
 
       <div className="knowledge-section">
         <div className="knowledge-section-head">

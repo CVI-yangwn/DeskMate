@@ -511,6 +511,7 @@ function registerIpc(): void {
   ipcMain.handle('memory:export', async () => {
     const result = await dialog.showSaveDialog({
       title: '导出 DeskMate 记忆',
+      message: '导出文件包含个人记忆与屏幕活动摘要，请勿放在 iCloud/共享目录。',
       defaultPath: path.join(
         app.getPath('documents'),
         `deskmate-memory-${new Date().toISOString().slice(0, 10)}.json`,
@@ -526,7 +527,8 @@ function registerIpc(): void {
     const content = result.filePath.toLowerCase().endsWith('.md')
       ? memoryExportMarkdown(data)
       : JSON.stringify(data, null, 2);
-    fs.writeFileSync(result.filePath, content, 'utf8');
+    fs.writeFileSync(result.filePath, content, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(result.filePath, 0o600);
     return result.filePath;
   });
   ipcMain.handle('settings:set-auto-memory', (_event, enabled: boolean) =>

@@ -125,6 +125,8 @@ test('搜索优先命中页面名，slug 处理中文与非法字符', () => {
 
   const found = searchWikiPages([other, desk], 'DeskMate');
   assert.equal(found[0].id, desk.id);
+  const natural = searchWikiPages([other, desk], '「DeskMate」现在是什么状态？');
+  assert.equal(natural[0]?.id, desk.id);
   assert.match(formatWikiContext([desk]), /DeskMate/);
   assert.equal(slugifyWikiName('DeskMate / 同桌'), 'DeskMate-同桌');
 });

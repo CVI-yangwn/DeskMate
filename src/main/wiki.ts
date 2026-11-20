@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { WikiItem, WikiPage, WikiPageType, WikiSource } from '../shared/types';
 
 export const WIKI_SUMMARY_LIMIT = 1600;
@@ -8,6 +9,7 @@ export const WIKI_CHANGELOG_LIMIT = 20;
 
 export interface WikiRef {
   label: string;
+  excerpt?: string;
   at: number;
 }
 
@@ -55,6 +57,14 @@ export function normalizeWikiName(name: string): string {
 
 export function wikiNameKey(name: string): string {
   return normalizeWikiName(name).toLowerCase();
+}
+
+export function wikiDirectory(userDataDir: string): string {
+  return path.join(userDataDir, 'wiki');
+}
+
+export function wikiPageFile(userDataDir: string, page: Pick<WikiPage, 'type' | 'name'>): string {
+  return path.join(wikiDirectory(userDataDir), page.type, `${slugifyWikiName(page.name)}.md`);
 }
 
 export function slugifyWikiName(name: string): string {
@@ -208,7 +218,12 @@ export function applyWikiDraft(
     const evidence = refs.get(clean);
     if (!evidence) throw new WikiValidationError(`引用了不存在的证据：${clean}`);
     if (nextSources.some((source) => source.ref === clean)) continue;
-    nextSources.push({ ref: clean, label: normalizeText(evidence.label, 120), at: evidence.at });
+    nextSources.push({
+      ref: clean,
+      label: normalizeText(evidence.label, 120),
+      ...(evidence.excerpt ? { excerpt: normalizeText(evidence.excerpt, 300) } : {}),
+      at: evidence.at,
+    });
   }
   // 模型偶尔会漏填 sources；从正文引用里补齐，保证页面上的来源和正文一致。
   for (const ref of [
@@ -218,7 +233,12 @@ export function applyWikiDraft(
     if (nextSources.some((source) => source.ref === ref)) continue;
     const evidence = allowedRefs.get(ref);
     if (!evidence) continue;
-    nextSources.push({ ref, label: normalizeText(evidence.label, 120), at: evidence.at });
+    nextSources.push({
+      ref,
+      label: normalizeText(evidence.label, 120),
+      ...(evidence.excerpt ? { excerpt: normalizeText(evidence.excerpt, 300) } : {}),
+      at: evidence.at,
+    });
   }
   nextSources.sort((a, b) => b.at - a.at);
 
@@ -289,6 +309,9 @@ export function renderWikiMarkdown(page: WikiPage): string {
   } else {
     for (const source of page.sources.slice(0, 12)) {
       lines.push(`- ${source.label} (${source.ref})`);
+      if (source.excerpt && source.excerpt !== source.label) {
+        lines.push(`  - ${source.excerpt}`);
+      }
     }
   }
 
@@ -296,9 +319,28 @@ export function renderWikiMarkdown(page: WikiPage): string {
 }
 
 export function searchWikiPages(pages: WikiPage[], query: string, limit = 6): WikiPage[] {
-  const clean = query.replace(/\s+/g, ' ').trim().toLowerCase();
+  const clean = query
+    .toLowerCase()
+    .replace(/[「」“”"'‘’？?！!。，,、；;：:\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!clean) return pages.slice(0, limit);
-  const terms = clean.split(' ').filter((term) => term.length >= 2);
+  const stop = new Set([
+    '现在',
+    '什么',
+    '状态',
+    '哪些',
+    '还有',
+    '没做完',
+    '怎么样',
+    '怎么',
+    '如何',
+    '是否',
+    '一下',
+    '这个',
+    '那个',
+  ]);
+  const terms = clean.split(' ').filter((term) => term.length >= 2 && !stop.has(term));
 
   const scored = pages
     .map((page) => {

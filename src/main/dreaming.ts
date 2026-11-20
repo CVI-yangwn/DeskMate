@@ -13,6 +13,7 @@ import type {
   WriteWikiPageInput,
 } from './deepseek';
 import { localDay, type MemoryStore } from './memory.ts';
+import { redactSensitive } from './redact.ts';
 import {
   dedupeRules,
   describeRule,
@@ -25,7 +26,7 @@ import {
   formatWikiRegistry,
   pagesFromFacts,
   renderWikiMarkdown,
-  slugifyWikiName,
+  wikiPageFile,
   type WikiDraft,
 } from './wiki.ts';
 
@@ -112,7 +113,7 @@ function buildProactiveEvidence(store: MemoryStore, since: number): string {
     .getDeliveriesSince(since, 40)
     .slice()
     .sort((a, b) => a.at - b.at);
-  const messages = store.getMessageRowsSince(since, 120);
+  const messages = store.getMessageRowsSince(since, 200);
   const lines: string[] = [];
 
   if (deliveries.length === 0) {
@@ -149,7 +150,7 @@ function buildProactiveEvidence(store: MemoryStore, since: number): string {
     }
   }
 
-  return lines.join('\n').slice(0, 9000);
+  return redactSensitive(lines.join('\n')).slice(0, 9000);
 }
 
 function localDigest(store: MemoryStore, day: string): string {
@@ -233,12 +234,8 @@ function writeFileSafe(file: string, content: string): void {
   }
 }
 
-export function wikiDirectory(userDataDir: string): string {
-  return path.join(userDataDir, 'wiki');
-}
-
 export function writeWikiFile(userDataDir: string, page: WikiPage): string {
-  const file = path.join(wikiDirectory(userDataDir), page.type, `${slugifyWikiName(page.name)}.md`);
+  const file = wikiPageFile(userDataDir, page);
   writeFileSafe(file, renderWikiMarkdown(page));
   return file;
 }

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   AgentSettings,
@@ -18,6 +18,7 @@ import type {
   IntentionPrediction,
   MemoryExport,
   MemoryFact,
+  MemoryHealth,
   MemoryKind,
   MemorySource,
   ProactiveClue,
@@ -27,10 +28,12 @@ import type {
   WikiPage,
 } from '../shared/types';
 import { eventKindLabel } from './proactiveRules.ts';
+import { redactSensitive } from './redact.ts';
 import {
   formatWikiContext,
   searchWikiPages,
   wikiNameKey,
+  wikiPageFile,
   type WikiRef,
 } from './wiki.ts';
 
@@ -52,7 +55,39 @@ const DEFAULT_SETTINGS: AgentSettings = {
 };
 
 const MAX_FACTS = 100;
-const MAX_MESSAGES = 200;
+const MAX_MESSAGES = 1000;
+const MAX_MESSAGE_AGE_MS = 7 * 24 * 60 * 60_000;
+const MAX_ACTIVITY_ROWS = 20_000;
+const ACTIVITY_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const SCHEMA_VERSION = 2;
+
+/** 所有记忆表。clear/迁移/测试 fixture 只认这一份清单。 */
+export const MEMORY_TABLES = [
+  'facts',
+  'messages',
+  'settings',
+  'anchors',
+  'auto_anchor_events',
+  'feedback_events',
+  'feedback_mutes',
+  'commitments',
+  'companion_days',
+  'activity_log',
+  'activity_corrections',
+  'intentions',
+  'intention_predictions',
+  'wiki_pages',
+  'wiki_tombstones',
+  'proactive_rules',
+  'proactive_clues',
+  'proactive_deliveries',
+  'daily_reports',
+  'dream_runs',
+  'agent_memory',
+] as const;
+
+/** 用户点“清空记忆”时要清的表；settings 保留，否则连开关都会被重置。 */
+export const CLEARABLE_TABLES = MEMORY_TABLES.filter((table) => table !== 'settings');
 const FACT_COLUMNS =
   'id, text, kind, pinned, source, confidence, created_at, updated_at, last_used_at, use_count';
 const FACT_COLUMNS_F = FACT_COLUMNS.split(',')
@@ -71,6 +106,10 @@ const KIND_LABEL: Record<MemoryKind, string> = {
   fact: '事实',
 };
 
+function hashWikiName(name: string): string {
+  return createHash('sha256').update(wikiNameKey(name)).digest('hex');
+}
+
 export interface ActivityObservationInput {
   at: number;
   app?: string;
@@ -79,9 +118,9 @@ export interface ActivityObservationInput {
   displayNames?: string[];
   confidence?: number;
   captureKind?: string;
-  /** 整屏 OCR 原文（截断后），用于变化检测与检索 */
+  /** 整屏 OCR 原文：只用于当轮判断，不写入数据库 */
   ocrText?: string;
-  /** 光标附近文本，来自辅助功能接口 */
+  /** 光标附近文本：只用于当轮判断，不写入数据库 */
   focusText?: string;
   /** 相比上一次扫描的变化摘要 */
   changeNote?: string;
@@ -610,14 +649,18 @@ export class MemoryStore {
   private readonly db: DatabaseSync;
   private readonly dbPath: string;
   private readonly jsonPath: string;
+  private readonly userDataDir: string;
 
   constructor(userDataDir: string) {
     fs.mkdirSync(userDataDir, { recursive: true });
+    this.userDataDir = userDataDir;
     this.jsonPath = path.join(userDataDir, 'memory.json');
     this.dbPath = path.join(userDataDir, 'memory.db');
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA busy_timeout = 3000');
+    // 删除后尽量不把旧页留在 freelist 里，配合 VACUUM 降低 strings 捡漏。
+    this.db.exec('PRAGMA secure_delete = ON');
     this.migrateSchema();
     this.migrateLegacyJson();
     this.secureFiles();
@@ -905,6 +948,55 @@ export class MemoryStore {
     );
     if (!anchorColumns.has('hidden')) {
       this.db.exec('ALTER TABLE anchors ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+    }
+
+    const versionRow = this.db.prepare('PRAGMA user_version').get() as
+      | { user_version?: number }
+      | undefined;
+    const version = Number(versionRow?.user_version ?? 0);
+    if (version < 2) {
+      // 旧版本把整屏 OCR 和光标全文落过盘；升级时一次性清掉历史正文。
+      this.db.exec(
+        'UPDATE activity_log SET ocr_text = NULL, focus_text = NULL WHERE ocr_text IS NOT NULL OR focus_text IS NOT NULL',
+      );
+    }
+    if (version < SCHEMA_VERSION) {
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    }
+    this.migrateTombstoneHashes();
+  }
+
+  /** 早期 tombstone 存的是明文页面名；新格式只存 SHA-256，避免客户名长期残留。 */
+  private migrateTombstoneHashes(): void {
+    try {
+      const rows = this.db
+        .prepare('SELECT name_key, name, deleted_at FROM wiki_tombstones')
+        .all() as unknown as Array<{ name_key: string; name: string; deleted_at: number }>;
+      if (rows.length === 0) return;
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO wiki_tombstones (name_key, name, deleted_at) VALUES (?, ?, ?)',
+      );
+      const remove = this.db.prepare('DELETE FROM wiki_tombstones WHERE name_key = ?');
+      this.db.exec('BEGIN');
+      try {
+        for (const row of rows) {
+          // 已经是 hash 格式且没有明文 name，说明迁移过了；不要二次哈希。
+          if (!row.name && /^[0-9a-f]{64}$/.test(row.name_key)) continue;
+          const source = (row.name || row.name_key || '').trim();
+          if (!source) continue;
+          const hash = hashWikiName(source);
+          if (hash === row.name_key && !row.name) continue;
+          insert.run(hash, '', Number(row.deleted_at) || Date.now());
+          if (hash !== row.name_key) remove.run(row.name_key);
+          else if (row.name) this.db.prepare('UPDATE wiki_tombstones SET name = ? WHERE name_key = ?').run('', hash);
+        }
+        this.db.exec('COMMIT');
+      } catch (error) {
+        this.db.exec('ROLLBACK');
+        throw error;
+      }
+    } catch (error) {
+      console.warn('tombstone 脱敏迁移失败', error);
     }
   }
 
@@ -1201,6 +1293,9 @@ export class MemoryStore {
     this.db
       .prepare('INSERT INTO messages (role, text, created_at) VALUES (?, ?, ?)')
       .run(role, clean, Date.now());
+    this.db
+      .prepare('DELETE FROM messages WHERE created_at < ?')
+      .run(Date.now() - MAX_MESSAGE_AGE_MS);
     this.db.exec(`
       DELETE FROM messages
       WHERE id NOT IN (SELECT id FROM messages ORDER BY id DESC LIMIT ${MAX_MESSAGES})
@@ -1630,8 +1725,13 @@ export class MemoryStore {
          ON CONFLICT(name_key) DO UPDATE SET deleted_at = excluded.deleted_at`,
       );
       for (const name of [page.name, ...page.aliases]) {
-        const key = wikiNameKey(name);
-        if (key) insert.run(key, name, now);
+        const key = hashWikiName(name);
+        if (key) insert.run(key, '', now);
+      }
+      try {
+        fs.rmSync(wikiPageFile(this.userDataDir, page), { force: true });
+      } catch (error) {
+        console.warn('删除 wiki 文件失败', error);
       }
     }
     const result = this.db.prepare('DELETE FROM wiki_pages WHERE id = ?').run(id);
@@ -1639,7 +1739,7 @@ export class MemoryStore {
   }
 
   isWikiNameTombstoned(name: string): boolean {
-    const key = wikiNameKey(name);
+    const key = hashWikiName(name);
     if (!key) return false;
     const row = this.db
       .prepare('SELECT name_key FROM wiki_tombstones WHERE name_key = ? LIMIT 1')
@@ -1648,7 +1748,7 @@ export class MemoryStore {
   }
 
   clearWikiTombstone(name: string): void {
-    const key = wikiNameKey(name);
+    const key = hashWikiName(name);
     if (key) this.db.prepare('DELETE FROM wiki_tombstones WHERE name_key = ?').run(key);
   }
 
@@ -1664,15 +1764,11 @@ export class MemoryStore {
   }
 
   getWikiContext(query = '', limit = 4): string {
-    const chosen = new Map<string, WikiPage>();
-    for (const page of this.searchWiki(query, limit)) chosen.set(page.id, page);
-    if (chosen.size < limit) {
-      for (const page of this.listWikiPages(limit)) {
-        if (chosen.size >= limit) break;
-        chosen.set(page.id, page);
-      }
-    }
-    return formatWikiContext([...chosen.values()], limit);
+    const clean = query.trim();
+    // 只有空查询（例如健康检查/摘要）才用最近页面兜底；
+    // 有查询但没命中时不要硬塞 4 页无关内容，避免挤掉规则和技能。
+    if (clean) return formatWikiContext(this.searchWiki(clean, limit), limit);
+    return formatWikiContext(this.listWikiPages(limit), limit);
   }
 
   // ------------------------------------------------------- proactive rules
@@ -2005,6 +2101,79 @@ export class MemoryStore {
       .run(text.slice(0, 8000), Date.now());
   }
 
+  private refExists(ref: string): boolean {
+    const separator = ref.indexOf(':');
+    if (separator <= 0) return false;
+    const kind = ref.slice(0, separator);
+    const id = ref.slice(separator + 1);
+    const table =
+      kind === 'msg'
+        ? 'messages'
+        : kind === 'activity'
+          ? 'activity_log'
+          : kind === 'anchor'
+            ? 'anchors'
+            : kind === 'intent'
+              ? 'intentions'
+              : kind === 'commit'
+                ? 'commitments'
+                : kind === 'delivery'
+                  ? 'proactive_deliveries'
+                  : kind === 'correction'
+                    ? 'activity_corrections'
+                    : '';
+    if (!table || !id) return false;
+    const row = this.db
+      .prepare(`SELECT 1 AS hit FROM ${table} WHERE id = ? LIMIT 1`)
+      .get(id) as { hit?: number } | undefined;
+    return Boolean(row?.hit);
+  }
+
+  getMemoryHealth(now = Date.now()): Omit<MemoryHealth, 'injectionChars'> & { injectionChars: number } {
+    const pages = this.listWikiPages(500);
+    let prunedSources = 0;
+    for (const page of pages) {
+      for (const source of page.sources) {
+        if (!this.refExists(source.ref)) prunedSources += 1;
+      }
+    }
+    const staleCutoff = now - 90 * 24 * 60 * 60_000;
+    let stalePages = 0;
+    let duplicateOpenItems = 0;
+    for (const page of pages) {
+      const open = page.items.filter((item) => item.status === 'open');
+      if (open.length > 0 && page.updatedAt < staleCutoff) stalePages += 1;
+      const seen = new Set<string>();
+      for (const item of open) {
+        const key = item.text.toLowerCase().replace(/\s+/g, '');
+        if (seen.has(key)) duplicateOpenItems += 1;
+        seen.add(key);
+      }
+    }
+    const messages = Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM messages').get() as { count: number }).count,
+    );
+    const activityRows = Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM activity_log').get() as { count: number }).count,
+    );
+    const oldest = this.db
+      .prepare('SELECT MIN(at) AS at FROM activity_log')
+      .get() as { at?: number | null } | undefined;
+
+    return {
+      pages: pages.length,
+      unsourcedPages: pages.filter((page) => page.sources.length === 0).length,
+      prunedSources,
+      stalePages,
+      duplicateOpenItems,
+      messages,
+      activityRows,
+      ...(oldest?.at ? { oldestActivityAt: Number(oldest.at) } : {}),
+      injectionChars: 0,
+      checkedAt: now,
+    };
+  }
+
   getMessageRowsSince(since: number, limit = 120): MessageRow[] {
     // 取最近的 N 条，再按时间正序返回：夜间整理和反馈复盘都更关心最近说了什么。
     return this.db
@@ -2024,6 +2193,7 @@ export class MemoryStore {
   getDreamEvidence(since: number, until = Date.now()): DreamEvidence {
     const refs = new Map<string, WikiRef>();
     const sections: string[] = [];
+    const excerpt = (text: string): string => redactSensitive(normalize(text)).slice(0, 300);
     const clock = (at: number): string =>
       new Date(at).toLocaleString('zh-CN', {
         month: '2-digit',
@@ -2032,12 +2202,13 @@ export class MemoryStore {
         minute: '2-digit',
       });
 
-    const messages = this.getMessageRowsSince(since, 60).filter((row) => row.created_at <= until);
+    const messages = this.getMessageRowsSince(since, 300).filter((row) => row.created_at <= until);
     if (messages.length) {
       const lines = messages.map((row) => {
         const ref = `msg:${row.id}`;
         refs.set(ref, {
           label: `${clock(row.created_at)} ${row.role === 'user' ? '用户' : '同桌'}：${row.text.slice(0, 60)}`,
+          excerpt: excerpt(row.text),
           at: row.created_at,
         });
         return `- [${ref}] ${clock(row.created_at)} ${row.role === 'user' ? '用户' : '同桌'}：${row.text.slice(0, 220)}`;
@@ -2059,7 +2230,11 @@ export class MemoryStore {
     if (anchors.length) {
       const lines = anchors.map((row) => {
         const ref = `anchor:${row.id}`;
-        refs.set(ref, { label: `锚点：${row.text.slice(0, 60)}`, at: Number(row.created_at) });
+        refs.set(ref, {
+          label: `锚点：${row.text.slice(0, 60)}`,
+          excerpt: excerpt(row.text),
+          at: Number(row.created_at),
+        });
         return `- [${ref}] ${row.kind}：${row.text}`;
       });
       sections.push(`## 今天的锚点\n${lines.join('\n')}`);
@@ -2079,7 +2254,11 @@ export class MemoryStore {
     if (commitments.length) {
       const lines = commitments.map((row) => {
         const ref = `commit:${row.id}`;
-        refs.set(ref, { label: `承诺：${row.text.slice(0, 60)}`, at: Number(row.created_at) });
+        refs.set(ref, {
+          label: `承诺：${row.text.slice(0, 60)}`,
+          excerpt: excerpt(row.text),
+          at: Number(row.created_at),
+        });
         return `- [${ref}] ${row.status === 'done' ? '已完成' : '未完成'}：${row.text}`;
       });
       sections.push(`## 答应过的事\n${lines.join('\n')}`);
@@ -2102,7 +2281,11 @@ export class MemoryStore {
     if (intentions.length) {
       const lines = intentions.map((row) => {
         const ref = `intent:${row.id}`;
-        refs.set(ref, { label: `意图：${row.text.slice(0, 60)}`, at: Number(row.end_at) });
+        refs.set(ref, {
+          label: `意图：${row.text.slice(0, 60)}`,
+          excerpt: excerpt(row.text),
+          at: Number(row.end_at),
+        });
         return `- [${ref}] ${clock(Number(row.start_at))}–${clock(Number(row.end_at))} [${
           row.app || '未知应用'
         }] ${row.text}`;
@@ -2160,7 +2343,11 @@ export class MemoryStore {
       const sampled = segments.length > maxSegments ? segments.filter((_, index) => index % step === 0) : segments;
       const lines = sampled.slice(0, maxSegments).map((segment) => {
         const ref = `activity:${segment.id}`;
-        refs.set(ref, { label: `活动：${segment.activity.slice(0, 60)}`, at: segment.start });
+        refs.set(ref, {
+          label: `活动：${segment.activity.slice(0, 60)}`,
+          excerpt: excerpt(`${segment.activity}${segment.change ? `（${segment.change}）` : ''}`),
+          at: segment.start,
+        });
         const range = segment.start === segment.end ? clock(segment.start) : `${clock(segment.start)}–${clock(segment.end)}`;
         const change = segment.change ? `（${segment.change}）` : '';
         const entity = segment.entity ? ` @${segment.entity}` : '';
@@ -2183,7 +2370,11 @@ export class MemoryStore {
     if (corrections.length) {
       const lines = corrections.map((row) => {
         const ref = `correction:${row.id}`;
-        refs.set(ref, { label: `纠正：${row.corrected_text.slice(0, 60)}`, at: Number(row.end_at) });
+        refs.set(ref, {
+          label: `纠正：${row.corrected_text.slice(0, 60)}`,
+          excerpt: excerpt(row.corrected_text),
+          at: Number(row.end_at),
+        });
         return `- [${ref}] 用户纠正：${row.corrected_text}`;
       });
       sections.push(`## 用户纠正过的事实\n${lines.join('\n')}`);
@@ -2195,6 +2386,7 @@ export class MemoryStore {
         const ref = `delivery:${row.id}`;
         refs.set(ref, {
           label: `${eventKindLabel(row.eventType)}：${row.text.slice(0, 60)}`,
+          excerpt: excerpt(row.text),
           at: row.at,
         });
         return `- [${ref}] ${clock(row.at)} ${row.eventType}（${row.outcome}${
@@ -2204,10 +2396,18 @@ export class MemoryStore {
       sections.push(`## 主动消息与用户反应\n${lines.join('\n')}`);
     }
 
+    for (const [key, value] of refs) {
+      refs.set(key, {
+        ...value,
+        label: redactSensitive(value.label),
+        ...(value.excerpt ? { excerpt: redactSensitive(value.excerpt) } : {}),
+      });
+    }
+
     return {
       since,
       until,
-      text: sections.join('\n\n').slice(0, 18_000),
+      text: redactSensitive(sections.join('\n\n')).slice(0, 18_000),
       refs,
     };
   }
@@ -2259,17 +2459,20 @@ export class MemoryStore {
         JSON.stringify((input.displayNames ?? []).slice(0, 4)),
         Math.min(1, Math.max(0, Number(input.confidence) || 0)),
         input.captureKind ?? null,
-        (input.ocrText ?? '').replace(/\r\n/g, '\n').slice(0, 12_000) || null,
-        normalize(input.focusText ?? '').slice(0, 2_000) || null,
+        // OCR / 光标全文只在当轮扫描和模型判断里用；不落盘，
+        // 避免屏幕上的代码、客户信息长期留在 SQLite/WAL/备份里。
+        null,
+        null,
         normalize(input.changeNote ?? '').slice(0, 300) || null,
         normalize(input.entity ?? '').slice(0, 120) || null,
       );
 
-    const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
-    this.db.prepare('DELETE FROM activity_log WHERE at < ?').run(cutoff);
+    this.db
+      .prepare('DELETE FROM activity_log WHERE at < ?')
+      .run(Date.now() - ACTIVITY_RETENTION_MS);
     this.db.exec(`
       DELETE FROM activity_log
-      WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT 2000)
+      WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT ${MAX_ACTIVITY_ROWS})
     `);
   }
 
@@ -2565,15 +2768,29 @@ export class MemoryStore {
   }
 
   clear(): void {
-    this.db.exec(
-      'DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; '
-        + 'DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; '
-        + 'DELETE FROM feedback_mutes; DELETE FROM activity_log; DELETE FROM activity_corrections; '
-        + 'DELETE FROM intentions; DELETE FROM intention_predictions; DELETE FROM wiki_pages; '
-        + 'DELETE FROM proactive_rules; DELETE FROM proactive_clues; DELETE FROM proactive_deliveries; '
-        + 'DELETE FROM daily_reports; DELETE FROM dream_runs; DELETE FROM agent_memory; '
-        + 'DELETE FROM wiki_tombstones;',
-    );
+    // 表清单来自 MEMORY_TABLES，避免新增表后“清空记忆”漏删。
+    this.db.exec(CLEARABLE_TABLES.map((table) => `DELETE FROM ${table};`).join(' '));
+    for (const folder of ['wiki', 'agent-memory']) {
+      try {
+        fs.rmSync(path.join(this.userDataDir, folder), { recursive: true, force: true });
+      } catch (error) {
+        console.warn('清空知识文件失败', folder, error);
+      }
+    }
+    // 旧版迁移留下的 memory.json / memory.json.migrated 也可能含事实。
+    for (const legacy of [this.jsonPath, `${this.jsonPath}.migrated`]) {
+      try {
+        fs.rmSync(legacy, { force: true });
+      } catch (error) {
+        console.warn('清空旧记忆文件失败', legacy, error);
+      }
+    }
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      this.db.exec('VACUUM');
+    } catch (error) {
+      console.warn('VACUUM 失败', error);
+    }
     this.secureFiles();
   }
 

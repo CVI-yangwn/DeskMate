@@ -9,7 +9,53 @@
 > - 未提交的批次也记，标 `未提交`，合并后再改成 commit 范围；
 > - 每次发版/合并前，把 `未发布` 归到日期下。
 
-当前状态：`v0.1.0` 原型，本地仓库 `main`，最近一次完整验证是 **67 个测试 + typecheck + build 全通过**（2026-11-20）。
+当前状态：`v0.1.0` 原型，本地仓库 `main`，最近一次完整验证是 **75 个测试 + typecheck + build 全通过**（2026-11-20）。
+
+---
+
+## 未发布 · 2026-11-20 — 记忆隐私、删除与证据硬化
+
+> 起因：对 Anthropic 四层记忆设计的辩论结论是“不做四层，先修已经暴露的隐私/删除/留存问题”。
+> 基线 commit：`bed3aba`（intent 层 + knowledge base + skills 的检查点）。
+
+### 修复
+
+- **删除是真删除**：`clear()` 改为按 `MEMORY_TABLES` 单一清单清表，并删 `wiki/`、`agent-memory/` 文件；删除单个 wiki 页会 unlink 对应 Markdown；清空后 `secure_delete` + `VACUUM`，降低 strings 从 DB/WAL 捡到旧 OCR 的概率。
+- **tombstone 脱敏**：从明文页面名改为 SHA-256 hash，升级时自动迁移旧行；页面名不再长期留在 DB。
+- **导出权限**：JSON/Markdown 导出强制 0600，并在保存对话框提示不要放 iCloud/共享目录。
+- **OCR/光标正文不落盘**：`activity_log.ocr_text/focus_text` 对新记录写 NULL；升级时一次性清空旧版本留下的正文；`activity_log` 只保留活动摘要。
+- **secure field**：`native/ax.swift` 同时检查 secure input、`AXSecureTextField` role/subrole；密码框直接不读。
+
+### 变更
+
+- messages 从 200 条提升到 **1000 条 + 7 天**双上限；Dreaming 取数从 60 条提升到 **300 条**。
+- activity 从 2000 行硬顶改为 **7 天 + 20000 行**安全上限，避免“所谓 7 天实际只有 33 小时”。
+- `WikiSource` 增加 200–300 字 `excerpt` 快照：原 `msg:`/`activity:` 行被裁剪后，页面仍能解释这条记忆。
+- wiki 查询先去掉引号/问号等标点，并跳过“现在/什么/状态”等停用词；自然问句能命中页面名。
+- `getWikiContext` 在非空查询无命中时不再硬塞最近 4 页，避免挤掉规则/技能；注入顺序改为 summary → rules → skills → wiki，总预算仍 4200 字。
+- 知识页新增「记忆健康」：页面/对话/活动数、注入字符、无来源页、过期来源、90 天僵尸页、重复未完成项。
+
+### 新增
+
+- `src/main/redact.ts`：证据送模前脱敏常见私钥、API key、JWT、邮箱、手机号、身份证、卡号；接入 Dreaming 证据、主动消息复盘、视觉 OCR/光标文本。
+- `scripts/eval-memory.mjs` + `evals/`：零模型检索体检（`--auto` 用现有页面出题；`--questions` 读真实 30 题），默认复制 DB 到临时目录，不碰线上库。
+- `scripts/test-memory-hardening.mjs`、`scripts/test-redact.mjs`；全量测试 **75** 个通过。
+
+### 验证
+
+```bash
+npm run typecheck
+npm test        # 75 pass
+npm run build
+npm run eval:memory
+```
+
+### 已知限制
+
+- 仍然没有 SQLCipher/加密卷；Time Machine、APFS 快照、iCloud 同步可能在应用外保留副本。
+- 截图本身仍会发给视觉模型；脱敏只覆盖文本证据，不覆盖图像像素。
+- 没有全量 transcript/events 层；按当前规模，先修留存和来源快照，不引入双写。
+- 记忆健康里的“过期来源”包含按策略裁剪的 ref，不是全部都是异常；面板用它提示“这条已不可回查”。
 
 ---
 

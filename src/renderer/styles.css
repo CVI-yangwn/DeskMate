@@ -2885,3 +2885,38 @@ body[data-route="panel"] ::selection {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+.knowledge-health {
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.knowledge-health-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.knowledge-health-head time {
+  color: var(--dim);
+  font-size: 8px;
+  font-weight: 400;
+}
+
+.knowledge-health-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  color: var(--dim);
+  font-size: 8.5px;
+}
+
+.knowledge-health-grid .warn {
+  color: var(--amber);
+}

@@ -82,6 +82,7 @@ npm run typecheck
 npm test
 npm run build
 npm run check:model
+npm run eval:memory   # 零模型 wiki 检索体检；默认复制 DB，不碰线上库
 ```
 
 ### macOS 权限
@@ -103,16 +104,18 @@ npm run check:model
 - **个人 wiki**：一页一个实体（项目 / 人物 / 话题），带当前摘要、未完成条目、证据来源和 Change Log；页面同时写成 `userData/wiki/<type>/<slug>.md`，可直接看、删、进 git；模型只能“只写变化”，没提到的条目不会被重写冲掉，引用必须来自当天证据；
 - **夜间整理**：默认每天 23:30 后把当天对话、锚点、承诺、意图、屏幕活动、主动消息反馈收敛成 wiki 页面、提醒规则、日结和一份“关于你”的摘要；最多 5 页，没 key 时做本地日结与项目页迁移；面板“知识”页可以“现在整理”；
 - **提醒规则学习**：收到主动消息后说“以后这类直接说 / 别提醒我 / 晚点再说 / 晚上别发”，会沉淀成带时间窗的规则，在下一次说话前生效；含糊表达先记线索，同类两次升级；气泡 14 天内被关 3 次也会学成“这类别说”；规则可暂停、删除、面板可见；设置里可整体关闭“从反馈学习”；
+- **记忆健康**：知识页显示页面/对话/活动数量、注入字符数、无来源页、已过期来源、90 天未更新但还有未完成项的页面、重复未完成项；另有 `npm run eval:memory` 自动从 wiki 生成检索体检，或读 30 题真实问题算 Recall@1/@4；
+- **隐私与删除**：清空记忆会删表 + 删 `wiki/`、`agent-memory/` 文件 + `secure_delete`/`VACUUM`；删除单个 wiki 页会 unlink 对应 Markdown；tombstone 只存 SHA-256，不存客户名；导出强制 0600；OCR/光标全文不落盘；
 - **技能**：`skills/<name>/SKILL.md`（YAML frontmatter）描述常驻、正文按需加载；内置日结、调试时间线、会前准备、周报四个；聊天里按需调用 `use_skill` 读取全文，再配合 `lookup_activity` / `search_knowledge` 执行；
 - **今天 / 陪伴记忆**：每天最多 8 个锚点（自动从聊天里抽 1–2 个，也可手动加/编辑）、承诺清单、次日一次 callback、晚间一句；不做全量时间线，只记值得记的；
 - **自动锚点**：测试红→绿、连续专注 60/90 分钟、测试红着卡住 30 分钟，会自动记一条；每天最多 2 条；删掉的锚点不会被自动重新生成；
 - **闭嘴反馈**：气泡关闭/点开都会回传；同类事件连续被关 2 次先静默 7 天，14 天内 3 次会沉淀成持久的 `stay_silent` 规则；全屏、会议、安静时段（设置里可配）不主动说话；学到的规则也压不住勿扰/安静时段；
 - **声音与人格**：设置里可选 macOS `say` 音色、语速，并写自己的 persona（称呼/语气/边界/绝对不说）；
-- **记忆导出**：长期记忆、锚点、承诺、日结、wiki 页面和提醒规则可导出为 JSON 或 Markdown；
+- **记忆导出**：长期记忆、锚点、承诺、日结、wiki 页面和提醒规则可导出为 JSON 或 Markdown；导出文件强制 0600，并提示不要放 iCloud/共享目录；
 - **自动记忆**：可开关；稳定的偏好/项目会从聊天中自动沉淀，相似记忆自动合并；关闭后只有明确说“记住”才写入；
-- **活动时间线**：每次扫描把应用、窗口、活动写进 SQLite（保留 7 天）；问“我刚才/过去一小时在干嘛”时会带最近 2 小时时间线，也可以用 `lookup_activity` 查更久；
-- **光标上下文**：通过辅助功能接口读光标附近文本（不是键盘监听），知道你在写什么；读不到（浏览器正文、IM 自绘输入框）时静默降级，见 [说明](docs/caret-context.zh-CN.md)；
-- **文本变化**：每次扫描把 OCR 原文入库（最多 12k 字），只有“新出现的报错行”才算值得说的变化，避免时钟/滚动噪音；
+- **活动时间线**：每次扫描把应用、窗口、活动摘要写进 SQLite（7 天，按时间而不是固定 2000 行）；OCR/光标全文只在当轮内存和模型判断里用，不落盘；问“我刚才/过去一小时在干嘛”时会带最近 2 小时时间线，也可以用 `lookup_activity` 查更久；
+- **光标上下文**：通过辅助功能接口读光标附近文本（不是键盘监听），知道你在写什么；遇到 secure input / 密码框直接放弃，读不到（浏览器正文、IM 自绘输入框）时静默降级，见 [说明](docs/caret-context.zh-CN.md)；
+- **文本变化**：OCR 只在内存里做行级 diff，只有“新出现的报错行”才算值得说的变化，避免时钟/滚动噪音；正文不写进数据库；
 - **注意力归属**：前台屏说了算，副屏只作为 `ambient` 线索；同一应用里冒出的新说法要连续两帧才确认，通知/弹窗不会把“在做什么”带偏；
 - **按“东西”切段**：同一个浏览器里换了文件/页面就另起一段（`entity` 存在 `intentions` 和 `activity_log`），不会把看过的十份材料拼成一条；
 - **意图层**：把连续几步扫描归成一件说得清的事（“在 Xcode 里修 auth 校验”），换应用 / 断档 8 分钟 / 同应用超 45 分钟自动收尾；命名走 DeepSeek，失败回退本地模板；面板“此刻”里显示当前这段和今天几段；
@@ -175,6 +178,7 @@ src/
 │  ├─ proactiveRules.ts      # 主动规则：时间窗、显式反馈解析、线索升级
 │  ├─ skills.ts              # 技能注册表：frontmatter、目录扫描、按需读取
 │  ├─ dreaming.ts            # 夜间整理：路由、逐页写作、规则/日结/摘要、文件输出
+│  ├─ redact.ts              # 证据送模前的密钥/联系方式/证件脱敏
 │  ├─ correction.ts          # 自我纠正意图识别与本地解析
 │  ├─ deepseek.ts            # 文本 + 视觉 + JSON + tool calls
 │  ├─ mockBrain.ts           # 无 key/401 时的本地回退
@@ -193,6 +197,10 @@ src/
 │  └─ styles.css
 └─ shared/types.ts           # IPC 类型
 
+evals/
+├─ README.md                 # 30 题评测说明
+└─ memory-questions.example.json
+
 scripts/
 ├─ dev.sh                    # 自动找 Node 后启动开发模式
 ├─ macos-setup.sh            # 安装、编译 OCR、检查、构建
@@ -208,6 +216,9 @@ scripts/
 ├─ test-proactive-rules.mjs  # 规则匹配 / 反馈解析 / 线索升级单测
 ├─ test-skills.mjs           # 技能解析与注册表单测
 ├─ test-dreaming.mjs         # 夜间整理编排与文件输出单测
+├─ test-memory-hardening.mjs # schema/清空/脱敏/保留/健康检查单测
+├─ test-redact.mjs           # 证据脱敏单测
+├─ eval-memory.mjs           # 零模型记忆检索体检（--auto / --questions）
 ├─ check-live2d-model.mjs    # 校验 model3.json 引用文件
 └─ send-test-event.mjs       # 手动触发红绿事件
 ```
@@ -233,12 +244,13 @@ git status
 - **多屏截图会包含其他窗口**：默认抓所有显示器整屏；如果任意屏有隐私排除应用可见，会退回前台窗口截图。若希望始终只抓窗口，可以把 `captureAllDisplays()` 换回 `captureActiveWindow()`。
 - **多屏隐私回退依赖 Accessibility**：没有辅助功能权限时，`get-windows` 读不到其他屏的窗口列表，只能保证前台应用被排除；授权后才会执行“任意屏有隐私应用则退回窗口截图”。读取失败会在 4–5 秒后超时，不会卡死扫描。
 - **自动扫描成本**：每轮扫描都会调用视觉模型 + 一次主动判断；默认 60 秒一轮，成本比原来的“只在有大事时说话”高。
-- **夜间整理成本**：默认一天一次，最多 5 页 + 规则 + 日结 + 摘要，约 8 次小调用；`autoDream` 可在设置里关掉。整理会把聊天文本和活动摘要发给模型，和聊天/视觉一致，暂未做额外脱敏。
-- **wiki 文件不会自动清理**：页面改名后旧 Markdown 会留在 `userData/wiki/`；面板删除页面只删 DB，不删文件，但会留 tombstone，夜间整理不会把同名页自动建回来。
+- **夜间整理成本**：默认一天一次，最多 5 页 + 规则 + 日结 + 摘要，约 8 次小调用；`autoDream` 可在设置里关掉。证据文本送模前会做常见密钥/联系方式/证件脱敏，但截图本身仍可能含敏感内容。
+- **wiki 文件按名字落盘**：删除页面会 unlink 当前 Markdown；改名后旧名字的 Markdown 仍会留在 `userData/wiki/`。tombstone 只存哈希，夜间不会把同名页自动建回来。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。
 - **打包还没闭环**：仍缺 electron-builder/DMG 流程；代码已支持从 userData 读取 `.env.local` 和 `config/avatar.haru.json`，`native/ocr` 需要随应用放进 resources。
 - **事件桥没有 token**：已经限制为本机 Origin + JSON Content-Type，但同机进程仍可调用；后续可以加一次性 token。
+- **静态加密还没做**：DB 文件 600、`secure_delete`/`VACUUM` 已开，但没有 SQLCipher/加密卷；Time Machine、APFS 快照和 iCloud 同步仍可能在应用外保留副本。
 
 ## 下一步
 
@@ -246,7 +258,7 @@ git status
 2. 接 macOS Speech push-to-talk。
 3. 接 `say` WAV + 振幅口型。
 4. 用一周真实数据校准夜间整理：页面质量、引用准确率、规则误判率。
-5. 加周报（`weekly-review` 技能已预留）和记忆评测（LoCoMo 或自建问题集）。
+5. 用最近 30 题真实问题跑 `npm run eval:memory`，连续两个月 Recall@4 < 70% 再考虑双链/embedding。
 6. 做只读任务委派 + 高风险动作审批，再考虑浏览器/文件操作。
 7. 打包 DMG，登录自启，代码签名。
 

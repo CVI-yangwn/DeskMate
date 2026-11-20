@@ -155,6 +155,7 @@ var document = ""
 var text = ""
 var selected = ""
 var caret = -1
+var payloadSecure = secureInput
 
 if let current = element {
     if (stringAttribute(current, kAXValueAttribute) ?? "").isEmpty && !secureInput {
@@ -164,16 +165,23 @@ if let current = element {
     }
     if let target = element {
         role = stringAttribute(target, kAXRoleAttribute) ?? ""
+        let subrole = stringAttribute(target, kAXSubroleAttribute) ?? ""
+        let secureField = secureInput
+            || role == "AXSecureTextField"
+            || subrole == "AXSecureTextField"
         title = stringAttribute(target, kAXTitleAttribute) ?? ""
         document = stringAttribute(target, "AXDocument") ?? ""
-        text = secureInput ? "" : stringAttribute(target, kAXValueAttribute) ?? ""
-        selected = secureInput ? "" : stringAttribute(target, kAXSelectedTextAttribute) ?? ""
+        text = secureField ? "" : stringAttribute(target, kAXValueAttribute) ?? ""
+        selected = secureField ? "" : stringAttribute(target, kAXSelectedTextAttribute) ?? ""
         caret = caretRange(target).map { $0.location } ?? -1
+        if secureField {
+            payloadSecure = true
+        }
     }
 }
 
 // 原生控件一般有 AXValue；Chromium 的 WebArea 要靠遍历子树取文本。
-if text.isEmpty && !secureInput, let target = window ?? element {
+if text.isEmpty && !secureInput && !payloadSecure, let target = window ?? element {
     text = collectText(target, limit: 4000, maxNodes: 400)
 }
 
@@ -200,7 +208,7 @@ var payload: [String: Any] = [
     "caret": caret,
     "selected": String(selected.prefix(400)),
     "context": String(context.prefix(900)),
-    "secure": secureInput,
+    "secure": payloadSecure,
 ]
 if let win = window, let rect = frame(of: win) {
     payload["bounds"] = rect
