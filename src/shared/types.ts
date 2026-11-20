@@ -85,6 +85,13 @@ export interface AppStatus {
   excludedApps: string[];
   visionCallsThisHour: number;
   scanStats: ScanStats;
+  wikiPageCount: number;
+  ruleCount: number;
+  skillCount: number;
+  lastDreamAt?: number;
+  autoDream: boolean;
+  dreamingAt: string;
+  proactiveLearning: boolean;
   state: DemoState;
 }
 
@@ -157,6 +164,130 @@ export interface AgentSettings {
   quietHoursEnabled: boolean;
   quietStart: string;
   quietEnd: string;
+  /** 每晚把对话/活动/锚点整理成 wiki 与规则 */
+  autoDream: boolean;
+  dreamingAt: string;
+  /** 从用户反馈里学习主动提醒规则 */
+  proactiveLearning: boolean;
+}
+
+export type WikiPageType = 'project' | 'contact' | 'topic';
+
+export interface WikiItem {
+  id: string;
+  text: string;
+  status: 'open' | 'done';
+  at: number;
+  source?: string;
+}
+
+export interface WikiSource {
+  ref: string;
+  label: string;
+  at: number;
+}
+
+export interface WikiChange {
+  at: number;
+  note: string;
+}
+
+/** 一页只对应一个真实实体：项目、人、长期话题。 */
+export interface WikiPage {
+  id: string;
+  type: WikiPageType;
+  name: string;
+  aliases: string[];
+  summary: string;
+  items: WikiItem[];
+  sources: WikiSource[];
+  changeLog: WikiChange[];
+  createdAt: number;
+  updatedAt: number;
+  lastDreamedAt?: number;
+}
+
+export type ProactiveDecision = 'tell_now' | 'follow_up_later' | 'stay_silent';
+
+export interface ProactiveRule {
+  id: string;
+  /** 事件类型，或 any 表示所有主动消息 */
+  kind: string;
+  label: string;
+  decision: ProactiveDecision;
+  windowStart?: string;
+  windowEnd?: string;
+  reason: string;
+  source: 'explicit' | 'dreaming' | 'feedback';
+  seen: number;
+  active: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProactiveClue {
+  id: string;
+  kind: string;
+  label: string;
+  decision: ProactiveDecision;
+  seen: number;
+  note: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+export type ProactiveOutcome =
+  | 'none'
+  | 'dismissed'
+  | 'opened'
+  | 'replied_positive'
+  | 'replied_negative';
+
+export interface ProactiveDelivery {
+  id: string;
+  eventType: string;
+  text: string;
+  at: number;
+  outcome: ProactiveOutcome;
+  suppressed: boolean;
+}
+
+export interface DailyReport {
+  day: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface DreamRun {
+  id: string;
+  day: string;
+  startedAt: number;
+  finishedAt?: number;
+  status: 'running' | 'ok' | 'error' | 'skipped';
+  pages: number;
+  rules: number;
+  message: string;
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  when: string;
+  source: 'builtin' | 'user';
+  path: string;
+}
+
+export interface KnowledgeView {
+  pages: WikiPage[];
+  rules: ProactiveRule[];
+  clues: ProactiveClue[];
+  reports: DailyReport[];
+  skills: SkillInfo[];
+  agentSummary: string;
+  lastRun: DreamRun | null;
+  dreamingEnabled: boolean;
+  dreamingAt: string;
+  wikiDir: string;
 }
 
 export interface SayVoice {
@@ -172,11 +303,52 @@ export interface MemoryExport {
   anchors: DailyAnchor[];
   commitments: Commitment[];
   companionDays: CompanionDay[];
+  wikiPages: WikiPage[];
+  rules: ProactiveRule[];
+}
+
+/** 一段连续的“在同一件事上”的操作，是 DeskMate 对意图的最小建模单位。 */
+export interface Intention {
+  id: string;
+  app: string;
+  title: string;
+  /** 在处理的文件/页面；同一 App 里换它会切成新的一段 */
+  entity?: string;
+  text: string;
+  startAt: number;
+  endAt: number;
+  stepCount: number;
+  confidence: number;
+  source: 'deepseek' | 'local';
+  at: number;
+}
+
+export type IntentionOutcome = 'accepted' | 'rejected';
+
+export interface IntentionPrediction {
+  id: string;
+  text: string;
+  app: string;
+  confidence: number;
+  decision: 'push' | 'discard';
+  reason: string;
+  at: number;
+  outcome?: IntentionOutcome;
+  outcomeAt?: number;
+}
+
+export interface IntentionView {
+  current: Intention | null;
+  recent: Intention[];
+  prediction: IntentionPrediction | null;
+  todayCount: number;
 }
 
 export interface Inspection {
   app: string;
   title: string;
+  /** 副屏/环境里看到、但不属于当前任务的东西，只作线索 */
+  ambient?: string[];
   activity: string;
   testStatus: TestResult;
   progress: number;
@@ -220,7 +392,7 @@ export interface UtterancePayload {
   state: DemoState;
   speakingMs: number;
   source: 'deepseek' | 'mock';
-  origin: 'chat' | 'proactive' | 'demo' | 'scan';
+  origin: 'chat' | 'proactive' | 'demo' | 'scan' | 'dream';
   eventType?: string;
 }
 
@@ -257,6 +429,8 @@ export interface DeskMateApi {
   resumePerception(): Promise<AppStatus>;
   setPrivacySettings(excludedApps: string[]): Promise<AppStatus>;
   getCompanionToday(): Promise<CompanionToday>;
+  getIntentions(): Promise<IntentionView>;
+  sendIntentionFeedback(id: string, outcome: IntentionOutcome): Promise<IntentionView>;
   addAnchor(text: string, kind?: AnchorKind): Promise<CompanionToday>;
   deleteAnchor(id: string): Promise<CompanionToday>;
   addCommitment(text: string, dueHint?: string): Promise<CompanionToday>;
@@ -268,6 +442,14 @@ export interface DeskMateApi {
   setVoiceSettings(voiceName: string, speechRate: number): Promise<AppStatus>;
   setPersona(text: string): Promise<AppStatus>;
   setQuietHours(enabled: boolean, start: string, end: string): Promise<AppStatus>;
+  setDreaming(enabled: boolean, at: string): Promise<AppStatus>;
+  setProactiveLearning(enabled: boolean): Promise<AppStatus>;
+  getKnowledge(): Promise<KnowledgeView>;
+  runDreaming(): Promise<DreamRun>;
+  deleteWikiPage(id: string): Promise<KnowledgeView>;
+  setRuleActive(id: string, active: boolean): Promise<KnowledgeView>;
+  deleteRule(id: string): Promise<KnowledgeView>;
+  openKnowledgeFolder(): Promise<string>;
   exportMemory(): Promise<string | null>;
   onOpenCompanion(cb: () => void): () => void;
   openPanel(): Promise<void>;

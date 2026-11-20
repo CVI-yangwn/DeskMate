@@ -9,7 +9,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "types": ["node"],
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "electron.vite.config.ts",

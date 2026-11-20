@@ -15,3 +15,4 @@ dist/
 .electron-cache/
 .chrome-*/
 native/ocr
+native/ax

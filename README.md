@@ -2,7 +2,7 @@
 
 > 一个坐在 macOS 屏幕边上的独立 AI 工作搭子：自己看屏幕、自己判断、自己说话。**不依赖 VS Code，不依赖任何 IDE 插件。**
 
-当前状态：**独立 macOS 原型已经搭好**。Electron 透明窗 + Haru Live2D + 屏幕/前台窗口感知 + 本地 Vision OCR + DeepSeek 视觉 + SQLite 长期记忆 + 工具调用 + 隐私/勿扰 + 面板 UI。内网 oneapi 已实测通过。
+当前状态：**独立 macOS 原型已经搭好**。Electron 透明窗 + Haru Live2D + 屏幕/前台窗口感知 + 本地 Vision OCR + DeepSeek 视觉 + SQLite 长期记忆 + 个人 wiki / 夜间整理 / 提醒规则学习 + 技能 + 工具调用 + 隐私/勿扰 + 面板 UI。内网 oneapi 已实测通过。
 还没接 macOS Speech 语音输入、`say` WAV 口型驱动和 DMG 打包。
 
 ## 架构
@@ -36,7 +36,7 @@ macOS 本机
 | 感知 | 前台窗口 + 所有显示器整屏 + 本地 OCR + 空闲时间；**无 VS Code 依赖** |
 | 嘴巴 | macOS `say` |
 | 耳朵 | macOS `SFSpeechRecognizer`（下一步） |
-| 记忆 | SQLite + FTS5（已实现） |
+| 记忆 | SQLite + FTS5：事实/锚点/意图 + 个人 wiki + 每晚整理 + 可学习提醒规则 |
 
 ## 运行
 
@@ -98,17 +98,27 @@ npm run check:model
 ![面板预览（模拟数据）](assets/panel-preview.png)
 
 - 透明、置顶、可拖动、点击穿透的 Haru 桌面形象；
-- 面板窗口（默认 480×840）：当前应用/窗口/活动、测试状态、屏幕权限、API 状态、聊天；
+- 面板窗口（默认 480×840）：四个标签页「此刻 / 对话 / 今天 / 知识」；此刻页放应用/窗口/活动、意图预测、测试状态和扫描控制，对话页专注聊天，今天页放锚点和答应过的事，知识页放日结、wiki、规则和技能；
 - **长期记忆**：SQLite + FTS5，保存在 `~/Library/Application Support/DeskMate/memory.db`；支持分类（项目/偏好/事实）、置顶、搜索、编辑、单条删除、手动添加；按问题检索相关记忆，并记录来源/置信度/使用次数；
+- **个人 wiki**：一页一个实体（项目 / 人物 / 话题），带当前摘要、未完成条目、证据来源和 Change Log；页面同时写成 `userData/wiki/<type>/<slug>.md`，可直接看、删、进 git；模型只能“只写变化”，没提到的条目不会被重写冲掉，引用必须来自当天证据；
+- **夜间整理**：默认每天 23:30 后把当天对话、锚点、承诺、意图、屏幕活动、主动消息反馈收敛成 wiki 页面、提醒规则、日结和一份“关于你”的摘要；最多 5 页，没 key 时做本地日结与项目页迁移；面板“知识”页可以“现在整理”；
+- **提醒规则学习**：收到主动消息后说“以后这类直接说 / 别提醒我 / 晚点再说 / 晚上别发”，会沉淀成带时间窗的规则，在下一次说话前生效；含糊表达先记线索，同类两次升级；气泡 14 天内被关 3 次也会学成“这类别说”；规则可暂停、删除、面板可见；设置里可整体关闭“从反馈学习”；
+- **技能**：`skills/<name>/SKILL.md`（YAML frontmatter）描述常驻、正文按需加载；内置日结、调试时间线、会前准备、周报四个；聊天里按需调用 `use_skill` 读取全文，再配合 `lookup_activity` / `search_knowledge` 执行；
 - **今天 / 陪伴记忆**：每天最多 8 个锚点（自动从聊天里抽 1–2 个，也可手动加/编辑）、承诺清单、次日一次 callback、晚间一句；不做全量时间线，只记值得记的；
 - **自动锚点**：测试红→绿、连续专注 60/90 分钟、测试红着卡住 30 分钟，会自动记一条；每天最多 2 条；删掉的锚点不会被自动重新生成；
-- **闭嘴反馈**：气泡关闭/点开都会回传；同类事件连续被关 2 次，静默 7 天；全屏、会议、安静时段（设置里可配）不主动说话；
+- **闭嘴反馈**：气泡关闭/点开都会回传；同类事件连续被关 2 次先静默 7 天，14 天内 3 次会沉淀成持久的 `stay_silent` 规则；全屏、会议、安静时段（设置里可配）不主动说话；学到的规则也压不住勿扰/安静时段；
 - **声音与人格**：设置里可选 macOS `say` 音色、语速，并写自己的 persona（称呼/语气/边界/绝对不说）；
-- **记忆导出**：长期记忆、锚点、承诺、日结可导出为 JSON 或 Markdown；
+- **记忆导出**：长期记忆、锚点、承诺、日结、wiki 页面和提醒规则可导出为 JSON 或 Markdown；
 - **自动记忆**：可开关；稳定的偏好/项目会从聊天中自动沉淀，相似记忆自动合并；关闭后只有明确说“记住”才写入；
 - **活动时间线**：每次扫描把应用、窗口、活动写进 SQLite（保留 7 天）；问“我刚才/过去一小时在干嘛”时会带最近 2 小时时间线，也可以用 `lookup_activity` 查更久；
+- **光标上下文**：通过辅助功能接口读光标附近文本（不是键盘监听），知道你在写什么；读不到（浏览器正文、IM 自绘输入框）时静默降级，见 [说明](docs/caret-context.zh-CN.md)；
+- **文本变化**：每次扫描把 OCR 原文入库（最多 12k 字），只有“新出现的报错行”才算值得说的变化，避免时钟/滚动噪音；
+- **注意力归属**：前台屏说了算，副屏只作为 `ambient` 线索；同一应用里冒出的新说法要连续两帧才确认，通知/弹窗不会把“在做什么”带偏；
+- **按“东西”切段**：同一个浏览器里换了文件/页面就另起一段（`entity` 存在 `intentions` 和 `activity_log`），不会把看过的十份材料拼成一条；
+- **意图层**：把连续几步扫描归成一件说得清的事（“在 Xcode 里修 auth 校验”），换应用 / 断档 8 分钟 / 同应用超 45 分钟自动收尾；命名走 DeepSeek，失败回退本地模板；面板“此刻”里显示当前这段和今天几段；
+- **主动猜下一步**：最近 6 条意图 + 时段 + 行为画像交给模型，只猜“下一步”，置信度 ≥ 0.60 才开口；面板可点“对 / 不是”，“不是”会在 2 小时内压掉相似猜测；`DESKMATE_INTENT_PREDICT=0` 可关；
 - **自我纠正**：当你说“不对，我刚才在写周报”时，系统提取正确活动和覆盖时间并写入纠正表；之后回答“刚才在干嘛”会优先使用纠正后的版本；
-- **工具调用**：`remember`、`search_memory`、`lookup_activity`、`scan_screen`、`set_dnd`；
+- **工具调用**：`remember`、`search_memory`、`lookup_activity`、`scan_screen`、`set_dnd`、`search_knowledge`、`read_wiki_page`、`list_skills`、`use_skill`；
 - **勿扰与主动策略**：启动先打招呼；手动扫描一定给气泡反馈；普通观察同一活动 10 分钟内不重复，活动刚变化至少隔 3 分钟；离开 10 分钟回来会欢迎；连续专注 25 分钟或空闲 10 分钟也会主动关注；空闲/锁屏会重置专注计时；
 - **扫描当前屏幕**：抓所有显示器的整屏（聚焦屏优先）→ 每块屏跑 macOS Vision 本地 OCR → 把多张图一起发给 `DeepSeek-V4-Flash-Vision-Exp` → 汇总更新活动/测试状态；任意屏出现隐私排除应用时自动退回到前台窗口截图；
 - **可信感知**：每次扫描都调用视觉模型；本地 OCR 作为证据和测试结果兜底，不再用它跳过 LLM；面板显示 OCR 行数、置信度、耗时、证据数和扫描/分析次数；
@@ -125,7 +135,8 @@ npm run check:model
 
 - macOS Speech push-to-talk；
 - `say` 输出 WAV → 振幅口型（当前是合成嘴型）；
-- 语义/向量记忆检索（当前是 FTS5 + LIKE）；
+- 语义/向量记忆检索（当前是 FTS5 + 名称/摘要加权匹配）；
+- 任务委派与审批（后台长任务、写文件/发消息前的确认卡）；
 - 真正的本地 AI 语音（当前是 macOS `say`）；
 - DMG 打包、登录自启、代码签名；
 - 多显示器贴边/吸附（当前可拖动并保存位置）；
@@ -144,6 +155,7 @@ config/
 
 native/
 ├─ ocr.swift                 # macOS Vision OCR 源码
+├─ ax.swift                  # 辅助功能读光标文本源码
 └─ ocr                       # 本地编译产物（gitignore，setup 时重建）
 
 src/
@@ -152,9 +164,17 @@ src/
 │  ├─ windows.ts             # Avatar / Panel 双窗口
 │  ├─ brain.ts               # 状态、API/mock 回退、截图分析、红绿检测、主动策略
 │  ├─ companion.ts           # 陪伴记忆：本地抽取、日期、早晚文案
+│  ├─ intention.ts           # 意图层：分段规则、本地归纳、行为画像、置信度闸门
+│  ├─ ax.ts                  # 调 native/ax 读光标附近文本
+│  ├─ change.ts              # OCR 行级 diff、只挑新报错、打字增量
+│  ├─ salience.ts            # 注意力归属：换应用立即采纳，同应用需连续确认
 │  ├─ perception.ts          # 前台窗口 + 截图 + 空闲时间
 │  ├─ ocr.ts                 # 调 native/ocr
-│  ├─ memory.ts              # SQLite + FTS5 长期记忆 + 活动时间线/纠正
+│  ├─ memory.ts              # SQLite + FTS5：长期记忆/活动/意图 + wiki/规则/日结
+│  ├─ wiki.ts                # 个人 wiki：草稿合并、引用校验、Markdown、搜索
+│  ├─ proactiveRules.ts      # 主动规则：时间窗、显式反馈解析、线索升级
+│  ├─ skills.ts              # 技能注册表：frontmatter、目录扫描、按需读取
+│  ├─ dreaming.ts            # 夜间整理：路由、逐页写作、规则/日结/摘要、文件输出
 │  ├─ correction.ts          # 自我纠正意图识别与本地解析
 │  ├─ deepseek.ts            # 文本 + 视觉 + JSON + tool calls
 │  ├─ mockBrain.ts           # 无 key/401 时的本地回退
@@ -167,6 +187,7 @@ src/
 ├─ renderer/
 │  ├─ AvatarApp.tsx          # 透明窗：Live2D + 气泡
 │  ├─ PanelApp.tsx           # 面板：状态 / 扫描 / 记忆 / 设置 / 聊天
+│  ├─ KnowledgePanel.tsx     # 知识页：日结 / wiki / 规则 / 技能
 │  ├─ Live2DStage.tsx        # Pixi + pixi-live2d-display
 │  ├─ Bubble.tsx
 │  └─ styles.css
@@ -179,13 +200,24 @@ scripts/
 ├─ test-correction.mjs       # 自我纠正解析单测
 ├─ test-event-bridge.mjs     # 事件桥校验单测
 ├─ test-companion.mjs        # 陪伴记忆本地抽取单测
+├─ test-change.mjs          # 文本变化 / 打字增量单测
+├─ test-salience.mjs        # 注意力归属平滑单测
+├─ test-intention.mjs        # 意图分段 / 兜底 / 置信度闸门单测
+├─ test-intention-store.mjs  # 意图与预测的落库单测
+├─ test-wiki.mjs             # wiki 合并 / 引用校验 / 搜索单测
+├─ test-proactive-rules.mjs  # 规则匹配 / 反馈解析 / 线索升级单测
+├─ test-skills.mjs           # 技能解析与注册表单测
+├─ test-dreaming.mjs         # 夜间整理编排与文件输出单测
 ├─ check-live2d-model.mjs    # 校验 model3.json 引用文件
 └─ send-test-event.mjs       # 手动触发红绿事件
 ```
 
+docs/ 里的 [意图层说明](docs/intent-layer.zh-CN.md) 记录了意图层的借鉴取舍；[Linger 架构对照](docs/linger-lessons.zh-CN.md) 记录了这次从 Linger 吸收了什么、哪些故意没抄；[知识库与夜间整理](docs/knowledge-and-dreaming.zh-CN.md) 是实现与排查说明。
+
 ## 版本管理
 
 仓库已经用 Git 维护，默认分支 `main`。当前是本地仓库，没有配置远程。
+按时间记录的改进、验证方式和已知限制见 [CHANGELOG.md](CHANGELOG.md)。
 
 ```bash
 git log --oneline
@@ -201,6 +233,8 @@ git status
 - **多屏截图会包含其他窗口**：默认抓所有显示器整屏；如果任意屏有隐私排除应用可见，会退回前台窗口截图。若希望始终只抓窗口，可以把 `captureAllDisplays()` 换回 `captureActiveWindow()`。
 - **多屏隐私回退依赖 Accessibility**：没有辅助功能权限时，`get-windows` 读不到其他屏的窗口列表，只能保证前台应用被排除；授权后才会执行“任意屏有隐私应用则退回窗口截图”。读取失败会在 4–5 秒后超时，不会卡死扫描。
 - **自动扫描成本**：每轮扫描都会调用视觉模型 + 一次主动判断；默认 60 秒一轮，成本比原来的“只在有大事时说话”高。
+- **夜间整理成本**：默认一天一次，最多 5 页 + 规则 + 日结 + 摘要，约 8 次小调用；`autoDream` 可在设置里关掉。整理会把聊天文本和活动摘要发给模型，和聊天/视觉一致，暂未做额外脱敏。
+- **wiki 文件不会自动清理**：页面改名后旧 Markdown 会留在 `userData/wiki/`；面板删除页面只删 DB，不删文件，但会留 tombstone，夜间整理不会把同名页自动建回来。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。
 - **打包还没闭环**：仍缺 electron-builder/DMG 流程；代码已支持从 userData 读取 `.env.local` 和 `config/avatar.haru.json`，`native/ocr` 需要随应用放进 resources。
@@ -211,8 +245,9 @@ git status
 1. 在 Mac 上跑 `bash scripts/dev.sh`，确认屏幕扫描 + 视觉分析 + 气泡/语音。
 2. 接 macOS Speech push-to-talk。
 3. 接 `say` WAV + 振幅口型。
-4. 加语义记忆检索。
-5. 打包 DMG，登录自启，代码签名。
-6. 给主动策略、感知和事件桥补更多单测。
+4. 用一周真实数据校准夜间整理：页面质量、引用准确率、规则误判率。
+5. 加周报（`weekly-review` 技能已预留）和记忆评测（LoCoMo 或自建问题集）。
+6. 做只读任务委派 + 高风险动作审批，再考虑浏览器/文件操作。
+7. 打包 DMG，登录自启，代码签名。
 
 先跑通“看屏幕 → 判断 → 说一句”，再追求“好听、好看、好玩”。

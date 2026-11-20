@@ -40,13 +40,17 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: 'lookup_activity',
       description:
-        '查询用户过去一段时间（分钟）的活动时间线。用户问“我刚才/过去一小时/上午在干嘛”时先调用；如果 <memory> 里的时间线不够再调用。',
+        '查询用户过去一段时间（分钟）的活动时间线。用户问“我刚才/过去一小时/上午在干嘛”时先调用；如果 <memory> 里的时间线不够再调用。做周报时用 daysAgo 一天一天取（0=今天，1=昨天）。',
       parameters: {
         type: 'object',
         properties: {
           minutes: {
             type: 'number',
             description: '回溯多少分钟，默认 60，最多 1440',
+          },
+          daysAgo: {
+            type: 'number',
+            description: '从几天前开始看，0=今天，1=昨天；做周报时用 0..6，最多 14',
           },
         },
       },
@@ -73,6 +77,59 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           enabled: { type: 'boolean', description: 'true 为开启勿扰，false 为关闭' },
         },
         required: ['enabled'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_knowledge',
+      description:
+        '搜索个人 wiki（项目页、人物页、话题页）。回答“我之前说过/那个项目进展/某某是谁”时先用它；比 search_memory 更适合有上下文的长期知识。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '关键词、项目名、人名' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_wiki_page',
+      description:
+        '读取一页个人 wiki 的完整内容（摘要、未完成事项、来源）。已知页面名时用；不确定先用 search_knowledge。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '页面名称或 id' },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_skills',
+      description: '列出可用的本地技能（名称、用途、触发场景）。',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'use_skill',
+      description:
+        '读取一个技能的完整步骤，然后按它执行。任务匹配技能（日结、调试时间线、会前准备、周报）时先调用；不要凭名字猜内容。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '技能名称' },
+        },
+        required: ['name'],
       },
     },
   },

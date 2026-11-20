@@ -13,16 +13,25 @@ import type {
   CompanionToday,
   DailyAnchor,
   DemoState,
+  DreamRun,
   Inspection,
+  Intention,
+  IntentionOutcome,
+  IntentionView,
   MemoryExport,
   MemoryFact,
   MemoryKind,
+  KnowledgeView,
+  ProactiveRule,
   ScanResult,
   TestResult,
   UtterancePayload,
   UtterancePlan,
 } from '../shared/types';
 import { AGENT_TOOLS } from './agentTools';
+import { readFocusedText } from './ax';
+import { EMPTY_GATE, gateActivity } from './salience';
+import { diffLines, emptyDiff, firstErrorLine, typingDelta } from './change';
 import {
   buildEveningFallback,
   buildMorningFallback,
@@ -43,6 +52,23 @@ import {
 } from './deepseek';
 import { fallbackCorrection, isCorrectionCue } from './correction';
 import { getDeepSeekEnv } from './env';
+import {
+  advanceSegment,
+  buildBehaviorProfile,
+  extractEntity,
+  finalizeSegment,
+  formatClock,
+  gatePrediction,
+  isRepeatedPrediction,
+  isWorthRecording,
+  localIntentionText,
+  PUSH_THRESHOLD,
+  sanitizeIntentionText,
+  segmentToPrompt,
+  type FinishedSegment,
+  type IntentionStep,
+  type SegmentAccumulator,
+} from './intention';
 import { MemoryStore } from './memory';
 import { MockBrain } from './mockBrain';
 import { runOcr } from './ocr';
@@ -57,7 +83,20 @@ import {
   readOpenWindows,
   rectsIntersect,
 } from './perception';
+import {
+  decisionLabel,
+  describeRule,
+  detectExplicitFeedback,
+  eventKindLabel,
+  gateProactive,
+  isProactiveKind,
+  promoteClues,
+  sanitizeRuleDraft,
+} from './proactiveRules';
+import { SkillRegistry } from './skills';
+import { runDreaming, wikiDirectory } from './dreaming';
 import { speakWithSay } from './tts';
+import { formatWikiPage } from './wiki';
 
 const SPEECH_COOLDOWN_MS = 2 * 60_000;
 
@@ -142,8 +181,28 @@ export class BrainService {
   private scanInFlight: Promise<ScanResult> | null = null;
   private visionHourStartedAt = Date.now();
   private visionCallsThisHour = 0;
+  // 意图层：正在累积的这一段、收尾命名任务的串行队列、上一次预测的时间。
+  private intentSegment: SegmentAccumulator | null = null;
+  private intentQueue: Promise<void> = Promise.resolve();
+  private lastIntentionSuggestionAt = 0;
+  // 文本层：上一次的 OCR / 光标文本，用来算“变化”和“在不在打字”。
+  private lastOcrText = '';
+  private lastFocusContext = '';
+  private lastChangeNote = '';
+  private typingNow = false;
+  private lastScanKey = '';
+  private activityGate = EMPTY_GATE;
+  // 知识层：本地技能目录 + 夜间整理的单飞锁。
+  private readonly skills: SkillRegistry;
+  private dreamInFlight: Promise<unknown> | null = null;
+  private lastDreamCheckAt = 0;
 
   constructor() {
+    this.skills = new SkillRegistry([
+      { dir: path.join(app.getPath('userData'), 'skills'), source: 'user' },
+      { dir: path.join(process.cwd(), 'skills'), source: 'builtin' },
+      { dir: path.join(process.resourcesPath, 'skills'), source: 'builtin' },
+    ]);
     this.client.setPersona(this.memory.getSettings().persona);
     if (this.client.configured) {
       this.apiStatus = 'unchecked';
@@ -182,6 +241,13 @@ export class BrainService {
       excludedApps: settings.excludedApps,
       visionCallsThisHour: this.visionCallsThisHour,
       scanStats: { ...this.scanStats },
+      wikiPageCount: this.memory.getWikiCount(),
+      ruleCount: this.memory.getRules(false).length,
+      skillCount: this.skills.info().length,
+      lastDreamAt: this.memory.getLastDreamRun()?.finishedAt,
+      autoDream: settings.autoDream,
+      dreamingAt: settings.dreamingAt,
+      proactiveLearning: settings.proactiveLearning,
       state: { ...this.state },
     };
   }
@@ -196,6 +262,150 @@ export class BrainService {
 
   getCompanionToday(): CompanionToday {
     return this.memory.getCompanionToday();
+  }
+
+  getIntentions(): IntentionView {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const recent = this.memory.getRecentIntentions(6);
+    return {
+      current: this.memory.getCurrentIntention() ?? this.liveSegmentPreview(),
+      recent,
+      prediction: this.memory.getLatestPrediction(),
+      todayCount: this.memory.countIntentionsSince(startOfDay.getTime()),
+    };
+  }
+
+  getKnowledge(): KnowledgeView {
+    const settings = this.memory.getSettings();
+    const wikiDir = wikiDirectory(app.getPath('userData'));
+    fs.mkdirSync(wikiDir, { recursive: true });
+    return {
+      pages: this.memory.listWikiPages(200),
+      rules: this.memory.getRules(),
+      clues: this.memory.getClues(),
+      reports: this.memory.getDailyReports(14),
+      skills: this.skills.info(),
+      agentSummary: this.memory.getAgentMemory(),
+      lastRun: this.memory.getLastDreamRun(),
+      dreamingEnabled: settings.autoDream,
+      dreamingAt: settings.dreamingAt,
+      wikiDir,
+    };
+  }
+
+  deleteWikiPage(id: string): KnowledgeView {
+    this.memory.deleteWikiPage(id);
+    this.emit();
+    return this.getKnowledge();
+  }
+
+  setRuleActive(id: string, active: boolean): KnowledgeView {
+    const rule = this.memory.getRule(id);
+    this.memory.setRuleActive(id, active);
+    // 暂停/删除“别说”规则时，把旧的 7 天静默一起清掉，否则看起来像没生效。
+    if (!active && rule) this.memory.clearEventMute(rule.kind);
+    this.emit();
+    return this.getKnowledge();
+  }
+
+  deleteRule(id: string): KnowledgeView {
+    const rule = this.memory.getRule(id);
+    this.memory.deleteRule(id);
+    if (rule) this.memory.clearEventMute(rule.kind);
+    this.emit();
+    return this.getKnowledge();
+  }
+
+  setDreaming(enabled: boolean, at: string): AppStatus {
+    this.memory.updateSettings({ autoDream: enabled, dreamingAt: at });
+    this.emit();
+    return this.getStatus();
+  }
+
+  setProactiveLearning(enabled: boolean): AppStatus {
+    this.memory.updateSettings({ proactiveLearning: enabled });
+    this.emit();
+    return this.getStatus();
+  }
+
+  /** 手动“现在整理”：跳过当天已整理的检查，允许重跑。 */
+  async runDreaming(force = true): Promise<DreamRun> {
+    if (this.dreamInFlight) return this.dreamInFlight as Promise<DreamRun>;
+    const task = runDreaming({
+      store: this.memory,
+      client: this.client,
+      userDataDir: app.getPath('userData'),
+      force,
+      maxPages: 5,
+    })
+      .then((run) => {
+        if (run.status === 'ok' && run.pages > 0) {
+          // 手动整理时补一次状态刷新；定时整理由 index 负责气泡。
+          this.emit();
+        }
+        return run;
+      })
+      .finally(() => {
+        this.dreamInFlight = null;
+        this.emit();
+      });
+    this.dreamInFlight = task;
+    return task;
+  }
+
+  /** 定时器每几分钟调一次；真正的“今天跑没跑过”由 runDreaming 判断。 */
+  async maybeRunDreaming(): Promise<DreamRun | null> {
+    const settings = this.memory.getSettings();
+    if (!settings.autoDream || this.dreamInFlight) return null;
+    if (Date.now() - this.lastDreamCheckAt < 4 * 60_000) return null;
+    this.lastDreamCheckAt = Date.now();
+
+    const [hour, minute] = settings.dreamingAt.split(':').map(Number);
+    const target = new Date();
+    target.setHours(Number.isFinite(hour) ? hour : 23, Number.isFinite(minute) ? minute : 30, 0, 0);
+
+    const last = this.memory.getLastDreamRun();
+    const lastAt = last?.finishedAt ?? last?.startedAt ?? 0;
+    // 昨晚没开机：超过 30 小时没整理就补一次，而不是等到今晚 23:30。
+    const stale = Date.now() - lastAt > 30 * 60 * 60_000;
+    if (Date.now() < target.getTime() && !stale) return null;
+
+    if (last?.day === localDay()) {
+      if (last.status === 'ok') return null;
+      // 目标时间之后已经试过一次“没有可整理”，就别每 5 分钟重试；
+      // 但如果那次是早上补跑，晚上到点还应该再试一次。
+      if (last.status === 'skipped' && last.startedAt >= target.getTime()) return null;
+    }
+    return this.runDreaming(false);
+  }
+
+  /**
+   * 正在攒的这一段还没写库，但面板需要立刻看到“我在干什么”，
+   * 所以用本地兜底文案做一个只读预览（source=local，id=live）。
+   */
+  private liveSegmentPreview(): Intention | null {
+    const acc = this.intentSegment;
+    if (!acc || acc.steps.length < 2) return null;
+    const segment = finalizeSegment(acc);
+    return {
+      id: 'live',
+      app: segment.app,
+      title: segment.title,
+      text: localIntentionText(segment),
+      startAt: segment.startAt,
+      endAt: segment.endAt,
+      stepCount: segment.steps.length,
+      confidence: 0.4,
+      source: 'local',
+      at: segment.endAt,
+    };
+  }
+
+  recordIntentionFeedback(id: string, outcome: IntentionOutcome): IntentionView {
+    if (id) this.memory.setIntentionOutcome(id, outcome === 'accepted' ? 'accepted' : 'rejected');
+    this.emit();
+    return this.getIntentions();
   }
 
   addAnchor(text: string, kind: AnchorKind = 'work'): CompanionToday {
@@ -236,6 +446,34 @@ export class BrainService {
 
   recordBubbleFeedback(eventType: string, action: BubbleFeedbackAction): void {
     this.memory.recordBubbleFeedback(eventType, action);
+    // 聊天回复、扫描反馈也会走气泡，但它们不是“主动提醒”，不能拿来学规则。
+    if (!isProactiveKind(eventType)) {
+      this.emit();
+      return;
+    }
+    this.memory.markDeliveryOutcome(action === 'open' ? 'opened' : 'dismissed');
+
+    if (action === 'dismiss' && this.memory.getSettings().proactiveLearning) {
+      // 点掉一次只算线索；14 天内同类被点掉 3 次，才沉淀成“这类别主动说”。
+      const count = this.memory.getDismissCountSince(eventType, Date.now() - 14 * 24 * 60 * 60_000);
+      const exists = this.memory
+        .getRules()
+        .some((rule) => rule.kind === eventType && rule.decision === 'stay_silent' && rule.active);
+      if (count >= 3 && !exists) {
+        const rule = sanitizeRuleDraft(
+          {
+            kind: eventType,
+            label: `${eventKindLabel(eventType)}：连续被忽略`,
+            decision: 'stay_silent',
+            reason: `14 天内关闭了 ${count} 次同类气泡`,
+            source: 'feedback',
+          },
+          Date.now(),
+        );
+        if (rule) this.memory.saveRule(rule);
+      }
+    }
+    this.emit();
   }
 
   exportMemory(): MemoryExport {
@@ -382,6 +620,16 @@ export class BrainService {
     return this.memory.getSettings().dnd;
   }
 
+  isQuietNow(): boolean {
+    const settings = this.memory.getSettings();
+    return isQuietHours(
+      new Date(),
+      settings.quietHoursEnabled,
+      settings.quietStart,
+      settings.quietEnd,
+    );
+  }
+
   isVoiceEnabled(): boolean {
     return this.memory.getSettings().voiceEnabled;
   }
@@ -482,8 +730,18 @@ export class BrainService {
     this.lastScanStartedAt = now;
     this.scanStats.total += 1;
 
+    const debugScan = process.env.DESKMATE_DEBUG_SCAN === '1';
+    let mark = started;
+    const lap = (label: string): void => {
+      if (!debugScan) return;
+      const now = Date.now();
+      console.info(`[scan:lap] ${label} ${now - mark}ms`);
+      mark = now;
+    };
+
     const screenStatus = getScreenStatus();
     const active = await readActiveWindow();
+    lap('active-window');
     const idleSec = getIdleSeconds();
     const previousIdleSec = this.lastIdleSec;
     this.lastIdleSec = idleSec;
@@ -517,6 +775,7 @@ export class BrainService {
 
     const display = displayForWindow(active);
     const visibleWindows = await readOpenWindows();
+    lap('open-windows');
     const allDisplays = screen.getAllDisplays();
     // 任意一块屏上出现隐私应用时，整屏截图退回到前台窗口，避免把隐私内容拍进去。
     const privacyFallback = visibleWindows.some((win) => {
@@ -537,6 +796,7 @@ export class BrainService {
     }
     frames = frames.filter((frame) => !this.isAppExcluded(frame.app));
     const captured = frames[0] ?? null;
+    lap('capture');
 
     if (!captured) {
       this.state = {
@@ -578,6 +838,28 @@ export class BrainService {
       .join('\n\n');
     const ocrLines = ocrResults.reduce((sum, result) => sum + (result?.lines.length ?? 0), 0);
     const ocrTest = detectOcrTest(ocrText);
+    lap('ocr');
+
+    // 光标处的文本：知道“在写什么”，比整屏缩略图有用得多。
+    // 只认真正的文本控件——IM 的列表视图会吐一堆和“在做的事”无关的文字。
+    const focus = await readFocusedText();
+    lap('ax');
+    const rawFocus = focus ? focus.context || focus.selected : '';
+    const focusText =
+      focus && focus.role.startsWith('AXText') && rawFocus.length >= 20 ? rawFocus : '';
+
+    // 换应用/换窗口时不跟上一屏比：否则永远在“新增 80 行”。
+    const scanKey = `${captured.app ?? ''}|${captured.title ?? ''}`;
+    const change =
+      scanKey === this.lastScanKey ? diffLines(this.lastOcrText, ocrText) : emptyDiff();
+    this.lastScanKey = scanKey;
+    this.typingNow = typingDelta(this.lastFocusContext, focusText).typing;
+    if (ocrText) this.lastOcrText = ocrText;
+    if (focusText) this.lastFocusContext = focusText;
+    // 整屏 OCR 的“新增 N 行”噪音太大（时钟、滚动、通知都会变），
+    // 只保留真正值得打断的一条：新出现的报错。
+    const errorLine = firstErrorLine(change);
+    this.lastChangeNote = errorLine ? `新增报错：${errorLine.slice(0, 60)}` : '';
 
     let inspection: Inspection;
     let source: 'deepseek' | 'mock' = 'mock';
@@ -589,11 +871,14 @@ export class BrainService {
           frames.map((frame, index) => ({
             base64: frame.base64,
             label: frame.displayName ?? `显示器 ${index + 1}`,
+            // 第一张是前台屏；其余只作为环境，不参与“在做什么”的判断。
+            primary: index === 0,
           })),
           captured.app,
           captured.title,
           'low',
           ocrText,
+          focusText,
         );
         source = 'deepseek';
         if (this.apiStatus !== 'ok') {
@@ -619,11 +904,15 @@ export class BrainService {
       inspection = this.mock.inspectScreenshot(captured.app, captured.title);
     }
 
+    lap('vision');
     if (inspection.testStatus === 'none' && ocrTest !== 'none') {
       inspection.testStatus = ocrTest;
     }
 
     const evidence = [...inspection.evidence];
+    for (const item of inspection.ambient ?? []) {
+      if (item.trim()) evidence.push(`环境: ${item.trim().slice(0, 60)}`);
+    }
     const ocrPreview = ocrResults
       .flatMap((result) => result?.lines ?? [])
       .filter((line) => line.confidence >= 0.5)
@@ -632,6 +921,8 @@ export class BrainService {
       .join(' | ')
       .slice(0, 220);
     if (ocrPreview) evidence.push(`OCR: ${ocrPreview}`);
+    if (focusText) evidence.push(`光标处: ${focusText.replace(/\s+/g, ' ').slice(0, 80)}`);
+    if (this.lastChangeNote) evidence.push(`变化: ${this.lastChangeNote.slice(0, 80)}`);
 
     evidence.push(
       frames.length > 1
@@ -653,11 +944,21 @@ export class BrainService {
     this.lastAnalyzedAt = analyzedAt;
     this.scanStats.analyzed += 1;
 
+    // 屏幕上冒出来的东西不一定是用户在做的事，过一次平滑再写进状态。
+    const decision = gateActivity(this.activityGate, {
+      activity: inspection.activity,
+      app: captured.app || inspection.app,
+    });
+    this.activityGate = decision.state;
+    if (!decision.stable) {
+      console.info(`[salience] keep: ${decision.reason}`);
+    }
+
     this.state = {
       ...this.state,
       app: captured.app || inspection.app,
       windowTitle: captured.title || inspection.title,
-      activity: inspection.activity || this.state.activity,
+      activity: decision.activity || this.state.activity,
       testResult: nextTest,
       idleSec,
       lastScanAt: analyzedAt,
@@ -694,7 +995,31 @@ export class BrainService {
         displayNames: this.state.displayNames,
         confidence: this.state.confidence,
         captureKind: this.state.captureKind,
+        ocrText,
+        focusText,
+        changeNote: this.lastChangeNote,
+        entity: extractEntity({
+          app: this.state.app ?? '',
+          title: this.state.windowTitle ?? '',
+          doc: focus?.doc,
+        }),
       });
+      // 人离开屏幕时活动不会变，别把“挂着”算成同一步。
+      if (idleSec < 300) {
+        this.trackIntention({
+          at: analyzedAt,
+          app: this.state.app ?? '',
+          title: this.state.windowTitle ?? '',
+          activity: recordedActivity,
+          entity: extractEntity({
+            app: this.state.app ?? '',
+            title: this.state.windowTitle ?? '',
+            doc: focus?.doc,
+          }),
+          focus: focusText,
+          change: change.summary,
+        });
+      }
     }
 
     let planPayload: UtterancePayload | null = null;
@@ -702,6 +1027,7 @@ export class BrainService {
     const dnd = this.memory.getSettings().dnd;
     const quiet = this.isQuietContext(now, active, display);
     let companionMoment: CompanionMoment | null = null;
+    let intentionPlan: UtterancePlan | null = null;
 
     if (!dnd && !quiet && previousTest === 'fail' && nextTest === 'pass') {
       event = `test-pass: 截图显示测试从失败变为通过（${this.state.activity}）`;
@@ -710,19 +1036,41 @@ export class BrainService {
       // 陪伴时刻优先于普通观察：早上接昨天、晚上收尾，都是一天一次。
       const observation = this.buildObservationEvent(idleSec, now, previousIdleSec);
       companionMoment = await this.maybeCompanionMoment(now, idleSec);
-      if (!companionMoment) event = observation;
+      if (!companionMoment) {
+        // 有把握的“下一步”猜测优先于泛泛的观察；
+        // 没把握时 maybeIntentionSuggestion 自己返回 null，不出声。
+        intentionPlan = await this.maybeIntentionSuggestion(now);
+        if (!intentionPlan) event = observation;
+      }
     }
 
     if (companionMoment) {
       const plan = this.makeCompanionPlan(companionMoment.text, companionMoment.kind);
       const eventType = `companion:${companionMoment.kind}`;
       const canSpeak = Date.now() - this.lastSpokenAt >= SPEECH_COOLDOWN_MS;
-      const muted = this.memory.isEventMuted(eventType);
+      const gate = this.proactiveGate(eventType, now, plan.displayText);
+      const muted = gate.rule?.decision !== 'tell_now' && this.memory.isEventMuted(eventType);
       console.info(
-        `[companion] ${companionMoment.kind} ${muted ? 'muted' : canSpeak ? 'speak' : 'cooldown'}`,
+        `[companion] ${companionMoment.kind} ${
+          !gate.allow ? 'suppressed' : muted ? 'muted' : canSpeak ? 'speak' : 'cooldown'
+        }`,
       );
 
-      if (canSpeak && !muted) {
+      if (!gate.allow) {
+        // 学到的规则压住了这条消息；仍然把今天标记为“已处理”，
+        // 否则每次扫描都会重新生成一次早晚问候，白白烧 API。
+        if (companionMoment.kind === 'morning') {
+          this.memory.markCallback(companionMoment.day);
+        } else {
+          this.memory.markRecap(companionMoment.day, '');
+        }
+      } else if (muted) {
+        this.memory.recordProactiveDelivery({
+          eventType,
+          text: plan.displayText,
+          suppressed: true,
+        });
+      } else if (canSpeak) {
         const speakingMs = this.isVoiceEnabled() ? this.speak(plan.speechText) : 0;
         planPayload = {
           plan,
@@ -734,18 +1082,62 @@ export class BrainService {
         };
         this.lastSpokenAt = Date.now();
         this.lastSpokenText = plan.displayText;
+        this.memory.recordProactiveDelivery({ eventType, text: plan.displayText });
         if (companionMoment.kind === 'morning') {
           this.memory.markCallback(companionMoment.day);
         } else {
           this.memory.markRecap(companionMoment.day, plan.displayText);
         }
         this.memory.appendMessage('assistant', plan.displayText);
+        // 晚间收尾同时把日结落到“今天”里。
+        if (companionMoment.kind === 'evening') {
+          this.memory.saveDailyReport(companionMoment.day, plan.displayText);
+        }
+      }
+    } else if (intentionPlan) {
+      const eventType = 'intent-predict';
+      const canSpeak = Date.now() - this.lastSpokenAt >= SPEECH_COOLDOWN_MS;
+      const gate = this.proactiveGate(eventType, now, intentionPlan.displayText);
+      console.info(
+        `[intent] predict ${!gate.allow ? 'suppressed' : canSpeak ? 'speak' : 'cooldown'}`,
+      );
+      if (!gate.allow) {
+        // 规则优先。
+      } else if (canSpeak) {
+        const speakingMs = this.isVoiceEnabled() ? this.speak(intentionPlan.speechText) : 0;
+        planPayload = {
+          plan: intentionPlan,
+          state: { ...this.state },
+          speakingMs,
+          source: 'deepseek',
+          origin: 'proactive',
+          eventType,
+        };
+        this.lastSpokenAt = Date.now();
+        this.lastSpokenText = intentionPlan.displayText;
+        this.memory.recordProactiveDelivery({
+          eventType,
+          text: intentionPlan.displayText,
+        });
+        this.memory.appendMessage('assistant', intentionPlan.displayText);
       }
     } else if (event) {
       const eventType = event.split(':')[0];
       // 测试红绿是低频高价值事件，不参与“同类降频”。
-      const muted = eventType !== 'test-pass' && this.memory.isEventMuted(eventType);
-      if (muted) {
+      const gate = this.proactiveGate(eventType, now, event);
+      const muted =
+        gate.rule?.decision !== 'tell_now' &&
+        eventType !== 'test-pass' &&
+        this.memory.isEventMuted(eventType);
+      if (!gate.allow) {
+        // 压住也算“处理过”，否则空闲/专注里程碑会每轮扫描都重复记账。
+        if (event.startsWith('idle:')) this.lastIdleNudgeAt = now;
+        else if (event.startsWith('focus-milestone:')) {
+          this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
+        }
+        console.info(`[proactive] ${eventType} suppressed by learned rule`);
+      } else if (muted) {
+        this.memory.recordProactiveDelivery({ eventType, text: event, suppressed: true });
         console.info(`[proactive] ${eventType} muted`);
       } else {
         const generated = await this.generatePlan(event);
@@ -767,6 +1159,7 @@ export class BrainService {
           };
           this.lastSpokenAt = Date.now();
           this.lastSpokenText = plan.displayText;
+          this.memory.recordProactiveDelivery({ eventType, text: plan.displayText });
           if (event.startsWith('idle:')) this.lastIdleNudgeAt = now;
           else if (event.startsWith('focus-milestone:')) {
             this.lastFocusMilestone = Math.floor(this.state.focusMin / 25);
@@ -794,6 +1187,32 @@ export class BrainService {
       durationMs: analyzedAt - started,
       source,
     };
+  }
+
+  /**
+   * 每次主动说话前先过“学到的规则”。压住的消息也记一笔（suppressed），
+   * 让夜间整理能看到“本来会说但没说”，而不是只看到说出口的。
+   */
+  private proactiveGate(
+    eventType: string,
+    now: number,
+    plannedText: string,
+  ): { allow: boolean; rule?: ProactiveRule } {
+    const gate = gateProactive(this.memory.getRules(false), eventType, now);
+    if (gate.decision === 'allow') return { allow: true, rule: gate.rule };
+    if (gate.rule) {
+      console.info(
+        `[proactive] ${eventType} suppressed: ${describeRule(gate.rule)} (${decisionLabel(
+          gate.rule.decision,
+        )})`,
+      );
+      this.memory.recordProactiveDelivery({
+        eventType,
+        text: plannedText || eventKindLabel(eventType),
+        suppressed: true,
+      });
+    }
+    return { allow: false, rule: gate.rule };
   }
 
   private buildObservationEvent(
@@ -834,7 +1253,154 @@ export class BrainService {
     const previous = this.lastSpokenText
       ? `\n上一句你刚说过：「${this.lastSpokenText.slice(0, 60)}」，不要重复。`
       : '';
-    return `observe: 用户正在「${activity.slice(0, 80)}」${previous}`;
+    const change = this.lastChangeNote ? `；刚刚${this.lastChangeNote}` : '';
+    const typing = this.typingNow ? '；正在打字' : '';
+    return `observe: 用户正在「${activity.slice(0, 80)}」${change}${typing}${previous}`;
+  }
+
+  /**
+   * 意图层的心跳：每次扫描后喂一步。
+   * 分段用本地规则（换应用 / 断档 8 分钟 / 同一件事太久），只有“命名”交给模型。
+   */
+  private trackIntention(step: IntentionStep): void {
+    const { acc, finished } = advanceSegment(this.intentSegment, step);
+    this.intentSegment = acc;
+    if (finished) this.labelIntentionSegment(finished);
+  }
+
+  /** 命名是异步的，串行排队，避免两段意图乱序写库。 */
+  private labelIntentionSegment(segment: FinishedSegment): void {
+    if (!isWorthRecording(segment)) return;
+
+    this.intentQueue = this.intentQueue
+      .then(async () => {
+        const fallback = localIntentionText(segment);
+        let text = fallback;
+        let confidence = 0.45;
+        let source: 'deepseek' | 'local' = 'local';
+
+        if (this.shouldTryApi()) {
+          try {
+            const labeled = await this.client.labelIntention(segmentToPrompt(segment));
+            const clean = sanitizeIntentionText(labeled.intention);
+            if (clean) {
+              text = clean;
+              confidence = labeled.confidence;
+              source = 'deepseek';
+            }
+          } catch (error) {
+            console.warn(
+              '[intent] 命名失败，回退本地',
+              error instanceof Error ? error.message.slice(0, 120) : 'unknown',
+            );
+          }
+        }
+
+        if (!text) return;
+        this.memory.addIntention({
+          app: segment.app,
+          title: segment.title,
+          ...(segment.entity ? { entity: segment.entity } : {}),
+          text,
+          startAt: segment.startAt,
+          endAt: segment.endAt,
+          stepCount: segment.steps.length,
+          confidence,
+          source,
+        });
+        this.emit();
+      })
+      .catch((error: unknown) => {
+        console.warn('[intent] 写入失败', error instanceof Error ? error.message : error);
+      });
+  }
+
+  /** 阈值可调：不同模型的置信度分布不一样，硬编码会让功能要么哑火、要么话痨。 */
+  private intentThreshold(): number {
+    const value = Number(process.env.DESKMATE_INTENT_THRESHOLD);
+    return Number.isFinite(value) && value > 0 && value <= 1 ? value : PUSH_THRESHOLD;
+  }
+
+  /**
+   * 主动猜“下一步”。只在有足够历史、冷却期过了、且置信度过线时才返回计划；
+   * 其余情况返回 null，让原来的观察逻辑接管。
+   */
+  private async maybeIntentionSuggestion(now: number): Promise<UtterancePlan | null> {
+    if (process.env.DESKMATE_INTENT_PREDICT === '0') return null;
+    if (!this.shouldTryApi()) return null;
+    if (now - this.lastIntentionSuggestionAt < 25 * 60_000) return null;
+    if (this.memory.isEventMuted('intent-predict')) return null;
+
+    // 上一条还没被回应就先别叠新的，避免用户一打开面板看到一串猜测。
+    const latest = this.memory.getLatestPrediction();
+    if (latest && !latest.outcome && now - latest.at < 30 * 60_000) return null;
+
+    const recent = this.memory.getRecentIntentions(6);
+    if (recent.length < 3) return null;
+
+    const week = this.memory.getIntentionsSince(now - 7 * 24 * 60 * 60_000, 200);
+    const profile = buildBehaviorProfile(week, now);
+
+    let prediction: { intention: string; app: string; confidence: number };
+    try {
+      prediction = await this.client.predictNextIntention({
+        history: recent
+          .slice()
+          .reverse()
+          .map((item) => `- ${item.text}`)
+          .join('\n'),
+        profile,
+        persona: this.memory.getSettings().persona,
+        now: new Date(now).toLocaleString('zh-CN', { hour12: false }),
+      });
+    } catch (error) {
+      this.noteApiError(error);
+      return null;
+    }
+
+    const text = sanitizeIntentionText(prediction.intention);
+    const gate = gatePrediction(
+      {
+        text,
+        app: prediction.app,
+        confidence: prediction.confidence,
+      },
+      this.intentThreshold(),
+    );
+
+    // 刚被否掉的猜测，换个说法也别再说一遍。
+    const rejected = this.memory.getRejectedPredictions(now - 2 * 60 * 60_000);
+    if (gate.push && isRepeatedPrediction(text, rejected)) {
+      gate.push = false;
+      gate.reason = '刚被否过';
+    }
+
+    const record = this.memory.addIntentionPrediction({
+      text: text || '（空预测）',
+      app: prediction.app,
+      confidence: prediction.confidence,
+      decision: gate.push ? 'push' : 'discard',
+      reason: gate.reason,
+    });
+    this.lastIntentionSuggestionAt = now;
+
+    if (!gate.push) {
+      console.info(`[intent] discard(${prediction.confidence.toFixed(2)}): ${text} — ${gate.reason}`);
+      return null;
+    }
+
+    console.info(`[intent] push(${prediction.confidence.toFixed(2)}): ${text}`);
+    const line = `我猜你接下来要${text.replace(/^在\s*/, '在 ')}`;
+    return {
+      say: true,
+      displayText: line.slice(0, 90),
+      speechText: line,
+      emotion: 'think',
+      motion: 'think',
+      urgency: 'low',
+      evidenceIds: [`intent:${record.id}`],
+      reason: `意图预测 ${prediction.confidence.toFixed(2)}`,
+    };
   }
 
   private maybeAutoAnchors(
@@ -1071,6 +1637,156 @@ export class BrainService {
     };
   }
 
+  /**
+   * 用户刚收到一条主动消息，这句话可能是在教它“以后怎么说”。
+   * 明确表达直接沉淀成规则；含糊表达先记成线索，同类累计两次再升级。
+   */
+  private async detectProactiveFeedback(message: string): Promise<ProactiveRule | null> {
+    if (!this.memory.getSettings().proactiveLearning) return null;
+    const delivery = this.memory.getRecentProactiveDelivery(30 * 60_000);
+    if (!delivery) return null;
+
+    let signal = detectExplicitFeedback(message, delivery.eventType);
+    const feedbackCue =
+      /(提醒|告诉|说|发|弹|吵|烦|以后|下次|别|不要|不用|晚点|回头|直接|第一时间|晚上|夜里|早上|上午|时间)/.test(
+        message,
+      );
+    if (!signal && feedbackCue && this.shouldTryApi()) {
+      try {
+        const suggestion = await this.client.suggestProactiveFeedback({
+          eventType: delivery.eventType,
+          deliveryText: delivery.text,
+          reply: message,
+        });
+        if (suggestion.isFeedback && suggestion.confidence >= 0.6) {
+          signal = {
+            decision: suggestion.decision,
+            kind: suggestion.kind,
+            label: suggestion.label || eventKindLabel(suggestion.kind),
+            strong: suggestion.confidence >= 0.85,
+            reason: suggestion.reason,
+            ...(suggestion.windowStart && suggestion.windowEnd
+              ? { windowStart: suggestion.windowStart, windowEnd: suggestion.windowEnd }
+              : {}),
+          };
+        }
+      } catch (error) {
+        console.warn(
+          '[proactive] 反馈识别失败',
+          error instanceof Error ? error.message.slice(0, 120) : 'unknown',
+        );
+      }
+    }
+
+    // “挺好/及时”只是认可，不足以改规则；要明确说以后/直接/早点才算。
+    if (
+      signal?.decision === 'tell_now' &&
+      !/(以后|下次|直接|早点|提前|第一时间|马上|立刻|应该)/.test(message)
+    ) {
+      signal = null;
+    }
+
+    if (!signal) return null;
+    const now = Date.now();
+    const hhmm = (at: number): string => {
+      const date = new Date(at);
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    };
+    if (signal.decision === 'follow_up_later' && !signal.windowStart) {
+      // “先记着/晚点再说”没有明确时段时，给一个最小窗口：
+      // 说“明天”就压到早上 8 点，其他情况压 2 小时，避免变成永久静音。
+      signal = {
+        ...signal,
+        windowStart: hhmm(now),
+        windowEnd: /明天|明早/.test(message) ? '08:00' : hhmm(now + 2 * 60 * 60_000),
+      };
+    }
+    this.memory.markDeliveryOutcome(
+      signal.decision === 'tell_now' ? 'replied_positive' : 'replied_negative',
+    );
+
+    if (!signal.strong && signal.decision !== 'follow_up_later') {
+      const clues = this.memory.getClues();
+      const existing = clues.find(
+        (clue) => clue.kind === signal!.kind && clue.decision === signal!.decision,
+      );
+      if (existing) {
+        existing.seen += 1;
+        existing.note = signal.reason || existing.note;
+        existing.lastSeenAt = now;
+      } else {
+        clues.push({
+          id: `clue-${signal.kind}-${signal.decision}`,
+          kind: signal.kind,
+          label: signal.label || eventKindLabel(signal.kind),
+          decision: signal.decision,
+          seen: 1,
+          note: signal.reason,
+          firstSeenAt: now,
+          lastSeenAt: now,
+        });
+      }
+      this.memory.replaceClues(clues);
+      const promoted = promoteClues(clues, this.memory.getRules(), now);
+      const first = promoted[0] ? this.memory.saveRule(promoted[0]) : null;
+      if (first?.decision === 'tell_now') this.memory.clearEventMute(first.kind);
+      if (first) this.emit();
+      return first;
+    }
+
+    const rule = sanitizeRuleDraft(
+      {
+        kind: signal.kind,
+        label: signal.label || eventKindLabel(signal.kind),
+        decision: signal.decision,
+        ...(signal.windowStart && signal.windowEnd
+          ? { windowStart: signal.windowStart, windowEnd: signal.windowEnd }
+          : {}),
+        reason: signal.reason,
+        source: 'explicit',
+      },
+      now,
+    );
+    if (!rule) return null;
+    const saved = this.memory.saveRule(rule);
+    if (saved.decision === 'tell_now') this.memory.clearEventMute(saved.kind);
+    this.emit();
+    return saved;
+  }
+
+  private ruleAcknowledgment(rule: ProactiveRule): string {
+    const kind = eventKindLabel(rule.kind);
+    if (rule.decision === 'tell_now') return `记下了：${kind}以后我直接说。`;
+    if (rule.decision === 'follow_up_later') return `记下了：${kind}在这个时段我先不主动提。`;
+    return `记下了：${kind}以后不主动提。`;
+  }
+
+  /** 聊天时给模型的知识上下文：wiki + 夜间摘要 + 学到的规则 + 技能目录。 */
+  private knowledgeContext(query: string): string {
+    const parts: string[] = [];
+    const summary = this.memory.getAgentMemory();
+    if (summary.trim()) parts.push(`【关于你（每晚整理）】\n${summary.trim().slice(0, 1400)}`);
+
+    const wiki = this.memory.getWikiContext(query, 4);
+    if (wiki) parts.push(`【个人 wiki（长期知识，优先于零散记忆）】\n${wiki}`);
+
+    const rules = this.memory
+      .getRules(false)
+      .slice(0, 8)
+      .map((rule) => `- ${describeRule(rule)}${rule.active ? '' : '（已暂停）'}`);
+    if (rules.length) {
+      parts.push(`【主动提醒规则（用户教过的）】\n${rules.join('\n')}`);
+    }
+
+    const skills = this.skills.catalog(10);
+    if (skills) {
+      parts.push(
+        `【可用技能（描述只在需要时看；匹配时先调用 use_skill 读取全文）】\n${skills}`,
+      );
+    }
+    return parts.join('\n\n').slice(0, 4200);
+  }
+
   async chat(text: string, history: ChatMessage[] = []): Promise<ChatReply> {
     const message = text.trim().slice(0, 1000);
     if (!message) return { text: '你说。', source: 'mock' };
@@ -1078,6 +1794,8 @@ export class BrainService {
     const autoMemoryEnabled = this.memory.getSettings().autoMemory;
     const explicitRemember = /(记住|记一下|别忘|以后都|以后请)/.test(message);
     this.lastUserAskedToRemember = explicitRemember;
+    const learnedRule = await this.detectProactiveFeedback(message);
+    const knowledgeText = this.knowledgeContext(message);
     const companion = this.memory.getCompanionToday();
     const companionLines = [
       companion.anchors.length
@@ -1096,6 +1814,10 @@ export class BrainService {
     ].filter(Boolean);
     const activityContext = this.memory.getActivityContext(120, 24);
     const correctionContext = this.memory.getRecentCorrectionContext(5);
+    const intentionContext = this.memory
+      .getRecentIntentions(3)
+      .map((item) => `- ${formatClock(item.startAt)} [${item.app || '未知应用'}] ${item.text}`)
+      .join('\n');
     const memoryText = `${
       autoMemoryEnabled
         ? '【自动记忆已开启：稳定的偏好/项目会自动保存，不需要询问用户是否记住。】\n'
@@ -1103,8 +1825,12 @@ export class BrainService {
     }${this.memory.getContext(message, 12)}${
       companionLines.length ? `\n${companionLines.join('\n')}` : ''
     }${activityContext ? `\n\n【最近活动时间线（可回答“我刚才在干嘛”）】\n${activityContext}` : ''}${
+      intentionContext
+        ? `\n\n【最近的意图（比活动高一层，回答“我刚才在做什么”时优先用它）】\n${intentionContext}`
+        : ''
+    }${
       correctionContext ? `\n\n【用户纠正过的事实，优先于上面的时间线】\n${correctionContext}` : ''
-    }`;
+    }${knowledgeText ? `\n\n${knowledgeText}` : ''}`;
     const correction = await this.handleCorrection(message, history);
     if (correction) {
       this.memory.appendMessage('user', message);
@@ -1185,6 +1911,10 @@ export class BrainService {
       }`;
     }
 
+    if (learnedRule) {
+      replyText = `${replyText}\n\n（${this.ruleAcknowledgment(learnedRule)}）`;
+    }
+
     this.memory.appendMessage('user', message);
     this.memory.appendMessage('assistant', replyText);
     this.emit();
@@ -1192,6 +1922,7 @@ export class BrainService {
     if (
       !autoFact &&
       !rememberedByTool &&
+      !learnedRule &&
       this.memory.getSettings().autoMemory &&
       message.length >= 8
     ) {
@@ -1360,9 +2091,11 @@ export class BrainService {
           24 * 60,
           Math.max(5, Math.round(Number(args.minutes) || 60)),
         );
-        const timeline = this.memory.getActivityContext(minutes, 40);
+        const daysAgo = Math.min(14, Math.max(0, Math.round(Number(args.daysAgo) || 0)));
+        const timeline = this.memory.getActivityContext(minutes, 40, daysAgo);
         return {
           minutes,
+          daysAgo,
           timeline: timeline || '没有这段时间的活动记录。',
         };
       }
@@ -1380,6 +2113,78 @@ export class BrainService {
         const enabled = Boolean(args.enabled);
         this.setDnd(enabled);
         return { dnd: enabled };
+      }
+      case 'search_knowledge': {
+        const query = typeof args.query === 'string' ? args.query : '';
+        const pages = this.memory.searchWiki(query, 6);
+        return {
+          pages: pages.map((page) => ({
+            id: page.id,
+            type: page.type,
+            name: page.name,
+            summary: page.summary.replace(/\[\[[^\]]+\]\]/g, '').slice(0, 260),
+            openItems: page.items
+              .filter((item) => item.status === 'open')
+              .slice(0, 5)
+              .map((item) => item.text),
+            updatedAt: page.updatedAt,
+          })),
+        };
+      }
+      case 'read_wiki_page': {
+        const key = typeof args.name === 'string' ? args.name : '';
+        const page =
+          this.memory.getWikiPageByName(key) ??
+          (key ? this.memory.getWikiPage(key) : null) ??
+          this.memory.searchWiki(key, 1)[0];
+        if (!page) return { error: `没有找到页面：${key}` };
+        const items = page.items
+          .slice(0, 15)
+          .map((item) => `- [${item.status === 'done' ? 'x' : ' '}] ${item.text}`)
+          .join('\n');
+        const sources = page.sources
+          .slice(0, 6)
+          .map((source) => `- ${source.label}`)
+          .join('\n');
+        const changes = page.changeLog
+          .slice(0, 4)
+          .map((change) => `- ${new Date(change.at).toLocaleDateString('zh-CN')} ${change.note}`)
+          .join('\n');
+        return {
+          id: page.id,
+          type: page.type,
+          name: page.name,
+          aliases: page.aliases,
+          summary: page.summary,
+          items,
+          sources,
+          changes,
+          text: formatWikiPage(page),
+        };
+      }
+      case 'list_skills': {
+        return {
+          skills: this.skills.info().map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            when: skill.when,
+          })),
+        };
+      }
+      case 'use_skill': {
+        const key = typeof args.name === 'string' ? args.name : '';
+        const skill = this.skills.get(key);
+        if (!skill) {
+          return {
+            error: `没有这个技能：${key}`,
+            available: this.skills.info().map((item) => item.name),
+          };
+        }
+        return {
+          name: skill.name,
+          description: skill.description,
+          instructions: skill.body,
+        };
       }
       default:
         return { error: `未知工具：${name}` };

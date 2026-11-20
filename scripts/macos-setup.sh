@@ -44,6 +44,13 @@ if [ -f native/ocr.swift ]; then
   fi
 fi
 
+if [ -f native/ax.swift ]; then
+  if [ ! -x native/ax ] || [ native/ax.swift -nt native/ax ]; then
+    echo "building native accessibility helper..."
+    xcrun swiftc -O native/ax.swift -o native/ax
+  fi
+fi
+
 if [ ! -f .env.local ]; then
   cp .env.example .env.local
   echo "created .env.local from .env.example"

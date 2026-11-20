@@ -4,10 +4,12 @@ import type {
   AppStatus,
   ChatMessage,
   CompanionToday,
+  IntentionView,
   MemoryFact,
   MemoryKind,
   SayVoice,
 } from '../shared/types';
+import { KnowledgePanel } from './KnowledgePanel';
 
 function now(): number {
   return Date.now();
@@ -77,6 +79,7 @@ function formatClock(value?: number): string {
 
 export default function PanelApp() {
   const [status, setStatus] = useState<AppStatus | null>(null);
+  const [activeTab, setActiveTab] = useState<'now' | 'chat' | 'today' | 'knowledge'>('now');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -87,6 +90,8 @@ export default function PanelApp() {
   const [companion, setCompanion] = useState<CompanionToday | null>(null);
   const [companionBusy, setCompanionBusy] = useState(false);
   const [companionError, setCompanionError] = useState('');
+  const [intentions, setIntentions] = useState<IntentionView | null>(null);
+  const [intentBusy, setIntentBusy] = useState(false);
   const [newAnchor, setNewAnchor] = useState('');
   const [newAnchorKind, setNewAnchorKind] = useState<AnchorKind>('work');
   const [newCommitment, setNewCommitment] = useState('');
@@ -100,6 +105,9 @@ export default function PanelApp() {
   const [quietDraftEnabled, setQuietDraftEnabled] = useState(false);
   const [quietStartDraft, setQuietStartDraft] = useState('23:30');
   const [quietEndDraft, setQuietEndDraft] = useState('08:00');
+  const [dreamEnabledDraft, setDreamEnabledDraft] = useState(true);
+  const [dreamAtDraft, setDreamAtDraft] = useState('23:30');
+  const [learningDraft, setLearningDraft] = useState(true);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [exportPath, setExportPath] = useState('');
   const [facts, setFacts] = useState<MemoryFact[]>([]);
@@ -175,6 +183,18 @@ export default function PanelApp() {
   }, []);
 
   useEffect(() => {
+    void loadIntentions();
+    const timer = window.setInterval(() => void loadIntentions(), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // 每次扫描后刷新：新意图和新的猜测都要尽快出现在面板上。
+  useEffect(() => {
+    if (!status?.state.lastScanAt) return;
+    void loadIntentions();
+  }, [status?.state.lastScanAt]);
+
+  useEffect(() => {
     if (!settingsOpen || !status) return;
     setVoiceDraft(status.voiceName || 'Tingting');
     setRateDraft(status.speechRate || 180);
@@ -182,6 +202,9 @@ export default function PanelApp() {
     setQuietDraftEnabled(Boolean(status.quietHoursEnabled));
     setQuietStartDraft(status.quietStart || '23:30');
     setQuietEndDraft(status.quietEnd || '08:00');
+    setDreamEnabledDraft(status.autoDream !== false);
+    setDreamAtDraft(status.dreamingAt || '23:30');
+    setLearningDraft(status.proactiveLearning !== false);
     void window.deskmate.getVoiceOptions().then(setVoiceOptions).catch(console.error);
   }, [settingsOpen]);
 
@@ -315,6 +338,9 @@ export default function PanelApp() {
     setQuietDraftEnabled(Boolean(status.quietHoursEnabled));
     setQuietStartDraft(status.quietStart || '23:30');
     setQuietEndDraft(status.quietEnd || '08:00');
+    setDreamEnabledDraft(status.autoDream !== false);
+    setDreamAtDraft(status.dreamingAt || '23:30');
+    setLearningDraft(status.proactiveLearning !== false);
     setSettingsOpen(true);
   }
 
@@ -334,6 +360,8 @@ export default function PanelApp() {
         quietStartDraft,
         quietEndDraft,
       );
+      next = await window.deskmate.setDreaming(dreamEnabledDraft, dreamAtDraft);
+      next = await window.deskmate.setProactiveLearning(learningDraft);
       setStatus(next);
       setSettingsOpen(false);
     } catch (error) {
@@ -396,6 +424,26 @@ export default function PanelApp() {
     setCompanionOpen(true);
     await loadCompanion();
     window.setTimeout(() => anchorInputRef.current?.focus(), 120);
+  }
+
+  async function loadIntentions() {
+    try {
+      setIntentions(await window.deskmate.getIntentions());
+    } catch (error) {
+      console.error('读取意图失败', error);
+    }
+  }
+
+  async function answerPrediction(id: string, outcome: 'accepted' | 'rejected') {
+    if (intentBusy) return;
+    setIntentBusy(true);
+    try {
+      setIntentions(await window.deskmate.sendIntentionFeedback(id, outcome));
+    } catch (error) {
+      console.error('提交意图反馈失败', error);
+    } finally {
+      setIntentBusy(false);
+    }
   }
 
   async function addAnchor() {
@@ -639,6 +687,12 @@ export default function PanelApp() {
     }
   }
 
+  function askFromNow(text: string) {
+    setActiveTab('chat');
+    setInput(text);
+    window.setTimeout(() => textareaRef.current?.focus(), 80);
+  }
+
   const state = status?.state;
   const dndOn = Boolean(status?.dnd);
   const voiceOn = status?.voiceEnabled !== false;
@@ -770,7 +824,42 @@ export default function PanelApp() {
         </div>
       </header>
 
-      <main className="panel-main">
+      <nav className="panel-tabs" aria-label="面板导航">
+        <button
+          className={activeTab === 'now' ? 'active' : ''}
+          aria-current={activeTab === 'now' ? 'page' : undefined}
+          onClick={() => setActiveTab('now')}
+        >
+          此刻
+        </button>
+        <button
+          className={activeTab === 'chat' ? 'active' : ''}
+          aria-current={activeTab === 'chat' ? 'page' : undefined}
+          onClick={() => setActiveTab('chat')}
+        >
+          对话
+        </button>
+        <button
+          className={activeTab === 'today' ? 'active' : ''}
+          aria-current={activeTab === 'today' ? 'page' : undefined}
+          onClick={() => setActiveTab('today')}
+        >
+          今天
+          {companion?.anchors.length ? <b>{companion.anchors.length}</b> : null}
+        </button>
+        <button
+          className={activeTab === 'knowledge' ? 'active' : ''}
+          aria-current={activeTab === 'knowledge' ? 'page' : undefined}
+          onClick={() => setActiveTab('knowledge')}
+        >
+          知识
+          {status?.wikiPageCount ? <b>{status.wikiPageCount}</b> : null}
+        </button>
+      </nav>
+
+      <main className={`panel-main panel-tab-${activeTab}`}>
+        {activeTab === 'now' && (
+          <>
         <section className="card now-card">
           <div className="now-head">
             <span className="eyebrow">此刻</span>
@@ -794,6 +883,51 @@ export default function PanelApp() {
 
           <p className="activity">{activity}</p>
 
+          {intentions?.current ? (
+            <div className="intent-line" title={intentions.current.app}>
+              <span className="intent-tag">意图</span>
+              <span className="intent-line-text">{intentions.current.text}</span>
+              <span className="intent-line-meta">
+                {intentions.current.stepCount} 步
+                {intentions.todayCount > 0 ? ` · 今天 ${intentions.todayCount} 段` : ''}
+              </span>
+            </div>
+          ) : null}
+
+          {intentions?.prediction?.decision === 'push' ? (
+            <div className="intent-guess">
+              <span className="intent-guess-label">我猜</span>
+              <span className="intent-guess-text" title={intentions.prediction.text}>
+                {intentions.prediction.text}
+              </span>
+              <span className="intent-guess-conf">
+                {Math.round((intentions.prediction.confidence || 0) * 100)}%
+              </span>
+              {intentions.prediction.outcome ? (
+                <span className="intent-guess-outcome">
+                  {intentions.prediction.outcome === 'accepted' ? '已确认' : '已作废'}
+                </span>
+              ) : (
+                <div className="intent-guess-actions">
+                  <button
+                    className="intent-choice"
+                    disabled={intentBusy}
+                    onClick={() => void answerPrediction(intentions.prediction!.id, 'accepted')}
+                  >
+                    对
+                  </button>
+                  <button
+                    className="intent-choice ghost"
+                    disabled={intentBusy}
+                    onClick={() => void answerPrediction(intentions.prediction!.id, 'rejected')}
+                  >
+                    不是
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : null}
+
           <div className="metrics">
             <div className="metric">
               <span>测试</span>
@@ -812,8 +946,8 @@ export default function PanelApp() {
             </div>
           </div>
 
-          <details className="context-insight diagnostics" title={state?.evidence?.join('\n') || undefined}>
-            <summary>诊断</summary>
+          <details className="diagnostics" title={state?.evidence?.join('\n') || undefined}>
+            <summary>细节</summary>
             <div className="diagnostics-grid">
               {captureLabel && (
               <span className="capture-chip" title={state?.displayNames?.join(' / ') || undefined}>
@@ -839,43 +973,6 @@ export default function PanelApp() {
               {status?.apiMessage ?? '读取中…'}
             </span>
             <span>{screenLabel}</span>
-          </div>
-        </section>
-
-        <section className="card today-card">
-          <div className="today-head">
-            <div>
-              <span className="eyebrow">今天</span>
-              <p className="today-sub">只记值得记的瞬间，不做流水账。</p>
-            </div>
-            <button className="text-button" onClick={() => void openCompanion()}>
-              记一下
-            </button>
-          </div>
-
-          <div className="today-list">
-            {companion?.anchors.length ? (
-              companion.anchors.slice(0, 3).map((anchor) => (
-                <div className="today-item" key={anchor.id}>
-                  <span className={`memory-kind ${anchor.kind}`}>
-                    {ANCHOR_KIND_LABEL[anchor.kind]}
-                  </span>
-                  <span className="today-text">{anchor.text}</span>
-                  <time>{formatClock(anchor.at)}</time>
-                </div>
-              ))
-            ) : (
-              <p className="muted">
-                今天还没有锚点。点“记一下”，或跟我说说今天做了什么。
-              </p>
-            )}
-          </div>
-
-          <div className="today-foot">
-            <span>{openCommitmentCount} 件答应的事</span>
-            <button className="text-button" onClick={() => void openCompanion()}>
-              查看今天
-            </button>
           </div>
         </section>
 
@@ -914,7 +1011,11 @@ export default function PanelApp() {
               <span className="toggle-dot" />
               记忆 <b>{status?.memoryCount ?? 0}</b>
             </button>
-            <button className="toggle" onClick={() => void openCompanion()}>
+            <button
+              className="toggle"
+              onClick={() => setActiveTab('today')}
+              title={`今天 ${companion?.anchors.length ?? 0} 个锚点 · ${openCommitmentCount} 件答应的事`}
+            >
               <span className="toggle-dot" />
               今天 <b>{companion?.anchors.length ?? 0}</b>
             </button>
@@ -936,6 +1037,31 @@ export default function PanelApp() {
           </div>
         </section>
 
+        <section className="card ask-card">
+          <div className="ask-head">
+            <span className="eyebrow">可以问我</span>
+            <span className="ask-sub">点一下带到对话</span>
+          </div>
+          <div className="ask-list">
+            <button onClick={() => askFromNow('我刚才一段时间在干嘛？')}>
+              我刚才一段时间在干嘛？
+              <span>→</span>
+            </button>
+            <button onClick={() => askFromNow('总结一下我今天做了什么')}>
+              总结一下今天做了什么
+              <span>→</span>
+            </button>
+            <button onClick={() => askFromNow('我接下来该做什么？')}>
+              我接下来该做什么？
+              <span>→</span>
+            </button>
+          </div>
+        </section>
+
+          </>
+        )}
+
+        {activeTab === 'chat' && (
         <section className="card chat-card">
           <div className="chat-head">
             <div className="chat-title-block">
@@ -946,6 +1072,9 @@ export default function PanelApp() {
           </div>
 
           <div className="chat-scroll" ref={scrollRef}>
+            <div className="chat-date">
+              今天 · {new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}
+            </div>
             {messages.map((message, index) => (
               <div
                 key={`${message.at}-${index}`}
@@ -1002,6 +1131,84 @@ export default function PanelApp() {
           </div>
           <div className="composer-hint">Enter 发送 · Shift+Enter 换行</div>
         </section>
+        )}
+
+        {activeTab === 'knowledge' && <KnowledgePanel lastDreamAt={status?.lastDreamAt} />}
+
+        {activeTab === 'today' && (
+          <section className="card today-page">
+            <div className="today-page-head">
+              <div>
+                <span className="eyebrow">今天</span>
+                <p>只记值得记的瞬间，不做流水账。</p>
+              </div>
+              <button className="text-button" onClick={() => void openCompanion()}>
+                管理
+              </button>
+            </div>
+
+            <div className="today-section">
+              <div className="today-section-head">
+                <span>今天的锚点</span>
+                <b>{companion?.anchors.length ?? 0}</b>
+              </div>
+              <div className="today-list">
+                {companion?.anchors.length ? (
+                  companion.anchors.map((anchor) => (
+                    <div className="today-item" key={anchor.id}>
+                      <span className={`memory-kind ${anchor.kind}`}>
+                        {ANCHOR_KIND_LABEL[anchor.kind]}
+                      </span>
+                      <span className="today-text">{anchor.text}</span>
+                      <time>{formatClock(anchor.at)}</time>
+                    </div>
+                  ))
+                ) : (
+                  <p className="muted">今天还没有锚点。点“管理”或跟我说说今天做了什么。</p>
+                )}
+              </div>
+            </div>
+
+            <div className="today-section">
+              <div className="today-section-head">
+                <span>答应过的事</span>
+                <b>{openCommitmentCount}</b>
+              </div>
+              <div className="today-list">
+                {companion?.commitments.length ? (
+                  companion.commitments.map((commitment) => (
+                    <div className="today-item" key={commitment.id}>
+                      <span className={`memory-kind ${commitment.status === 'done' ? 'fact' : 'preference'}`}>
+                        {commitment.status === 'done' ? '完成' : '答应'}
+                      </span>
+                      <span className={`today-text ${commitment.status === 'done' ? 'done' : ''}`}>
+                        {commitment.text}
+                      </span>
+                      <time>{commitment.dueHint || formatClock(commitment.at)}</time>
+                    </div>
+                  ))
+                ) : (
+                  <p className="muted">今天还没有答应的事。</p>
+                )}
+              </div>
+            </div>
+
+            <div className="today-note">
+              <span className="eyebrow">今天的一句话</span>
+              <p>
+                {companion?.recapText ||
+                  '今天还没收尾。晚上我会把值得留的 2–3 件事串起来。'}
+              </p>
+            </div>
+
+            <div className="today-page-foot">
+              <span>2–3 个锚点比流水账更有用</span>
+              <button className="text-button" onClick={() => void openCompanion()}>
+                记一下
+              </button>
+            </div>
+          </section>
+        )}
       </main>
 
       <footer className="panel-footer">
@@ -1125,6 +1332,40 @@ export default function PanelApp() {
                   disabled={settingsBusy || !quietDraftEnabled}
                   aria-label="安静时段结束"
                 />
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <label>每晚整理</label>
+              <p>把当天的对话、活动和锚点收成 wiki 页面、提醒规则和一份日结。只在这个时间之后、且当天还没整理时跑一次。</p>
+              <div className="settings-row">
+                <button
+                  className={`toggle ${dreamEnabledDraft ? 'on' : ''}`}
+                  onClick={() => setDreamEnabledDraft((value) => !value)}
+                  aria-pressed={dreamEnabledDraft}
+                  disabled={settingsBusy}
+                >
+                  <span className="toggle-dot" />
+                  自动整理 <b>{dreamEnabledDraft ? '开' : '关'}</b>
+                </button>
+                <input
+                  type="time"
+                  value={dreamAtDraft}
+                  onChange={(event) => setDreamAtDraft(event.target.value)}
+                  disabled={settingsBusy || !dreamEnabledDraft}
+                  aria-label="每晚整理时间"
+                />
+              </div>
+              <div className="settings-row">
+                <button
+                  className={`toggle ${learningDraft ? 'on' : ''}`}
+                  onClick={() => setLearningDraft((value) => !value)}
+                  aria-pressed={learningDraft}
+                  disabled={settingsBusy}
+                >
+                  <span className="toggle-dot" />
+                  从反馈学习提醒规则 <b>{learningDraft ? '开' : '关'}</b>
+                </button>
               </div>
             </div>
 

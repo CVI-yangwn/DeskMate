@@ -11,11 +11,28 @@ import type {
   CompanionDay,
   CompanionToday,
   DailyAnchor,
+  DailyReport,
+  DreamRun,
+  Intention,
+  IntentionOutcome,
+  IntentionPrediction,
   MemoryExport,
   MemoryFact,
   MemoryKind,
   MemorySource,
+  ProactiveClue,
+  ProactiveDelivery,
+  ProactiveOutcome,
+  ProactiveRule,
+  WikiPage,
 } from '../shared/types';
+import { eventKindLabel } from './proactiveRules.ts';
+import {
+  formatWikiContext,
+  searchWikiPages,
+  wikiNameKey,
+  type WikiRef,
+} from './wiki.ts';
 
 const DEFAULT_SETTINGS: AgentSettings = {
   dnd: false,
@@ -29,6 +46,9 @@ const DEFAULT_SETTINGS: AgentSettings = {
   quietHoursEnabled: false,
   quietStart: '23:30',
   quietEnd: '08:00',
+  autoDream: true,
+  dreamingAt: '23:30',
+  proactiveLearning: true,
 };
 
 const MAX_FACTS = 100;
@@ -59,6 +79,14 @@ export interface ActivityObservationInput {
   displayNames?: string[];
   confidence?: number;
   captureKind?: string;
+  /** 整屏 OCR 原文（截断后），用于变化检测与检索 */
+  ocrText?: string;
+  /** 光标附近文本，来自辅助功能接口 */
+  focusText?: string;
+  /** 相比上一次扫描的变化摘要 */
+  changeNote?: string;
+  /** 这条记录对应的文件/页面 */
+  entity?: string;
 }
 
 export interface ActivityCorrectionInput {
@@ -96,6 +124,52 @@ interface TimelineSegment {
   title: string;
   activity: string;
   corrected: boolean;
+}
+
+export interface IntentionInput {
+  app?: string;
+  title?: string;
+  entity?: string;
+  text: string;
+  startAt: number;
+  endAt: number;
+  stepCount?: number;
+  confidence?: number;
+  source?: 'deepseek' | 'local';
+}
+
+export interface IntentionPredictionInput {
+  text: string;
+  app?: string;
+  confidence?: number;
+  decision: 'push' | 'discard';
+  reason?: string;
+}
+
+interface IntentionRow {
+  id: string;
+  app: string | null;
+  title: string | null;
+  entity: string | null;
+  text: string;
+  start_at: number;
+  end_at: number;
+  step_count: number;
+  confidence: number | null;
+  source: string | null;
+  created_at: number;
+}
+
+interface IntentionPredictionRow {
+  id: string;
+  text: string;
+  app: string | null;
+  confidence: number | null;
+  decision: string | null;
+  reason: string | null;
+  created_at: number;
+  outcome: string | null;
+  outcome_at: number | null;
 }
 
 function formatHourMinute(value: number): string {
@@ -144,6 +218,9 @@ function clampSettings(value: unknown): AgentSettings {
     quietHoursEnabled: Boolean(raw.quietHoursEnabled),
     quietStart: clampTime(raw.quietStart, DEFAULT_SETTINGS.quietStart),
     quietEnd: clampTime(raw.quietEnd, DEFAULT_SETTINGS.quietEnd),
+    autoDream: raw.autoDream !== false,
+    dreamingAt: clampTime(raw.dreamingAt, DEFAULT_SETTINGS.dreamingAt),
+    proactiveLearning: raw.proactiveLearning !== false,
   };
 }
 
@@ -158,7 +235,7 @@ function normalize(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 500);
 }
 
-function localDay(date = new Date()): string {
+export function localDay(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
@@ -274,6 +351,39 @@ function toFact(row: FactRow): MemoryFact {
   };
 }
 
+function toIntention(row: IntentionRow): Intention {
+  const source: 'deepseek' | 'local' = row.source === 'deepseek' ? 'deepseek' : 'local';
+  return {
+    id: row.id,
+    app: row.app ?? '',
+    title: row.title ?? '',
+    ...(row.entity ? { entity: row.entity } : {}),
+    text: row.text,
+    startAt: Number(row.start_at) || 0,
+    endAt: Number(row.end_at) || 0,
+    stepCount: Number(row.step_count) || 0,
+    confidence: Math.min(1, Math.max(0, Number(row.confidence) || 0.5)),
+    source,
+    at: Number(row.created_at) || Date.now(),
+  };
+}
+
+function toIntentionPrediction(row: IntentionPredictionRow): IntentionPrediction {
+  const outcome: IntentionOutcome | undefined =
+    row.outcome === 'accepted' || row.outcome === 'rejected' ? row.outcome : undefined;
+  return {
+    id: row.id,
+    text: row.text,
+    app: row.app ?? '',
+    confidence: Math.min(1, Math.max(0, Number(row.confidence) || 0)),
+    decision: row.decision === 'push' ? 'push' : 'discard',
+    reason: row.reason ?? '',
+    at: Number(row.created_at) || Date.now(),
+    ...(outcome ? { outcome } : {}),
+    ...(row.outcome_at ? { outcomeAt: Number(row.outcome_at) } : {}),
+  };
+}
+
 function toAnchor(row: AnchorRow): DailyAnchor {
   const kind: AnchorKind =
     row.kind === 'feeling' || row.kind === 'open_loop' || row.kind === 'moment'
@@ -312,6 +422,187 @@ function toCompanionDay(row: CompanionDayRow | undefined, day: string): Companio
     callbackAt: row?.callback_at ? Number(row.callback_at) : undefined,
     recapAt: row?.recap_at ? Number(row.recap_at) : undefined,
     recapText: row?.recap_text ?? undefined,
+  };
+}
+
+interface WikiRow {
+  id: string;
+  type: string;
+  name: string;
+  aliases: string;
+  summary: string;
+  items: string;
+  sources: string;
+  change_log: string;
+  created_at: number;
+  updated_at: number;
+  last_dreamed_at: number | null;
+}
+
+interface RuleRow {
+  id: string;
+  kind: string;
+  label: string;
+  decision: string;
+  window_start: string | null;
+  window_end: string | null;
+  reason: string;
+  source: string;
+  seen: number;
+  active: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface ClueRow {
+  id: string;
+  kind: string;
+  label: string;
+  decision: string;
+  seen: number;
+  note: string;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+interface DeliveryRow {
+  id: string;
+  event_type: string;
+  text: string;
+  outcome: string;
+  suppressed: number;
+  created_at: number;
+}
+
+interface DreamRunRow {
+  id: string;
+  day: string;
+  started_at: number;
+  finished_at: number | null;
+  status: string;
+  pages: number;
+  rules: number;
+  message: string;
+}
+
+interface MessageRow {
+  id: number;
+  role: string;
+  text: string;
+  created_at: number;
+}
+
+interface ActivityRow {
+  id: number;
+  at: number;
+  app: string | null;
+  title: string | null;
+  activity: string;
+  entity: string | null;
+  change_note: string | null;
+}
+
+export interface DreamEvidence {
+  since: number;
+  until: number;
+  text: string;
+  refs: Map<string, WikiRef>;
+}
+
+function parseJson<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function toWikiPage(row: WikiRow): WikiPage {
+  return {
+    id: row.id,
+    type: row.type === 'project' || row.type === 'contact' ? row.type : 'topic',
+    name: row.name,
+    aliases: parseJson<string[]>(row.aliases, []),
+    summary: row.summary,
+    items: parseJson<WikiPage['items']>(row.items, []),
+    sources: parseJson<WikiPage['sources']>(row.sources, []),
+    changeLog: parseJson<WikiPage['changeLog']>(row.change_log, []),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    ...(row.last_dreamed_at ? { lastDreamedAt: Number(row.last_dreamed_at) } : {}),
+  };
+}
+
+function toRule(row: RuleRow): ProactiveRule {
+  return {
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    decision:
+      row.decision === 'stay_silent' || row.decision === 'follow_up_later'
+        ? row.decision
+        : 'tell_now',
+    ...(row.window_start && row.window_end
+      ? { windowStart: row.window_start, windowEnd: row.window_end }
+      : {}),
+    reason: row.reason,
+    source:
+      row.source === 'dreaming' || row.source === 'feedback' ? row.source : 'explicit',
+    seen: Number(row.seen),
+    active: Number(row.active) !== 0,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function toClue(row: ClueRow): ProactiveClue {
+  return {
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    decision:
+      row.decision === 'stay_silent' || row.decision === 'follow_up_later'
+        ? row.decision
+        : 'tell_now',
+    seen: Number(row.seen),
+    note: row.note,
+    firstSeenAt: Number(row.first_seen_at),
+    lastSeenAt: Number(row.last_seen_at),
+  };
+}
+
+function toDelivery(row: DeliveryRow): ProactiveDelivery {
+  const outcome: ProactiveOutcome =
+    row.outcome === 'dismissed' ||
+    row.outcome === 'opened' ||
+    row.outcome === 'replied_positive' ||
+    row.outcome === 'replied_negative'
+      ? row.outcome
+      : 'none';
+  return {
+    id: row.id,
+    eventType: row.event_type,
+    text: row.text,
+    at: Number(row.created_at),
+    outcome,
+    suppressed: Number(row.suppressed) !== 0,
+  };
+}
+
+function toDreamRun(row: DreamRunRow): DreamRun {
+  return {
+    id: row.id,
+    day: row.day,
+    startedAt: Number(row.started_at),
+    ...(row.finished_at ? { finishedAt: Number(row.finished_at) } : {}),
+    status:
+      row.status === 'ok' || row.status === 'error' || row.status === 'skipped'
+        ? row.status
+        : 'running',
+    pages: Number(row.pages),
+    rules: Number(row.rules),
+    message: row.message,
   };
 }
 
@@ -419,7 +710,11 @@ export class MemoryStore {
         activity TEXT NOT NULL,
         display_names TEXT,
         confidence REAL,
-        capture_kind TEXT
+        capture_kind TEXT,
+        ocr_text TEXT,
+        focus_text TEXT,
+        change_note TEXT,
+        entity TEXT
       );
       CREATE INDEX IF NOT EXISTS activity_log_at ON activity_log(at);
       CREATE TABLE IF NOT EXISTS activity_corrections (
@@ -432,6 +727,116 @@ export class MemoryStore {
         confidence REAL NOT NULL DEFAULT 1
       );
       CREATE INDEX IF NOT EXISTS activity_corrections_range ON activity_corrections(start_at, end_at);
+      CREATE TABLE IF NOT EXISTS intentions (
+        id TEXT PRIMARY KEY,
+        app TEXT,
+        title TEXT,
+        entity TEXT,
+        text TEXT NOT NULL,
+        start_at INTEGER NOT NULL,
+        end_at INTEGER NOT NULL,
+        step_count INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        source TEXT NOT NULL DEFAULT 'local',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS intentions_created ON intentions(created_at DESC);
+      CREATE TABLE IF NOT EXISTS intention_predictions (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        app TEXT,
+        confidence REAL NOT NULL DEFAULT 0,
+        decision TEXT NOT NULL DEFAULT 'discard',
+        reason TEXT,
+        created_at INTEGER NOT NULL,
+        outcome TEXT,
+        outcome_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS intention_predictions_created ON intention_predictions(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS wiki_pages (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL UNIQUE,
+        aliases TEXT NOT NULL DEFAULT '[]',
+        summary TEXT NOT NULL DEFAULT '',
+        items TEXT NOT NULL DEFAULT '[]',
+        sources TEXT NOT NULL DEFAULT '[]',
+        change_log TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_dreamed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS wiki_pages_updated ON wiki_pages(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS wiki_tombstones (
+        name_key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        deleted_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proactive_rules (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        window_start TEXT,
+        window_end TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'explicit',
+        seen INTEGER NOT NULL DEFAULT 1,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS proactive_rules_active ON proactive_rules(active, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS proactive_clues (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        seen INTEGER NOT NULL DEFAULT 1,
+        note TEXT NOT NULL DEFAULT '',
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proactive_deliveries (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        text TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'none',
+        suppressed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        outcome_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS proactive_deliveries_created ON proactive_deliveries(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS daily_reports (
+        day TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS dream_runs (
+        id TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'running',
+        pages INTEGER NOT NULL DEFAULT 0,
+        rules INTEGER NOT NULL DEFAULT 0,
+        message TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS dream_runs_started ON dream_runs(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS agent_memory (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        text TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
 
       CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
         text,
@@ -465,6 +870,31 @@ export class MemoryStore {
     for (const [name, definition] of additions) {
       if (!columns.has(name)) {
         this.db.exec(`ALTER TABLE facts ADD COLUMN ${name} ${definition}`);
+      }
+    }
+
+    const observationColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(activity_log)').all() as unknown as Array<{ name: string }>).map(
+        (row) => row.name,
+      ),
+    );
+    const intentionColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(intentions)').all() as unknown as Array<{ name: string }>).map(
+        (row) => row.name,
+      ),
+    );
+    if (!intentionColumns.has('entity')) {
+      this.db.exec('ALTER TABLE intentions ADD COLUMN entity TEXT');
+    }
+
+    for (const [name, definition] of [
+      ['ocr_text', 'TEXT'],
+      ['focus_text', 'TEXT'],
+      ['change_note', 'TEXT'],
+      ['entity', 'TEXT'],
+    ] as Array<[string, string]>) {
+      if (!observationColumns.has(name)) {
+        this.db.exec(`ALTER TABLE activity_log ADD COLUMN ${name} ${definition}`);
       }
     }
 
@@ -1073,6 +1503,24 @@ export class MemoryStore {
       .run(clean, mutedUntil, count, now);
   }
 
+  clearEventMute(eventType: string): void {
+    const clean = eventType.trim().slice(0, 60);
+    if (clean === 'any') {
+      this.db.exec('UPDATE feedback_mutes SET muted_until = 0, dismiss_count = 0');
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO feedback_mutes (event_type, muted_until, dismiss_count, updated_at)
+         VALUES (?, 0, 0, ?)
+         ON CONFLICT(event_type) DO UPDATE SET
+           muted_until = 0,
+           dismiss_count = 0,
+           updated_at = excluded.updated_at`,
+      )
+      .run(clean, Date.now());
+  }
+
   isEventMuted(eventType: string): boolean {
     const row = this.db
       .prepare('SELECT muted_until FROM feedback_mutes WHERE event_type = ? LIMIT 1')
@@ -1090,6 +1538,680 @@ export class MemoryStore {
     return rows.map((row) => toCompanionDay(row, row.day));
   }
 
+  // ---------------------------------------------------------------- wiki
+  listWikiPages(limit = 100): WikiPage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, type, name, aliases, summary, items, sources, change_log,
+                created_at, updated_at, last_dreamed_at
+         FROM wiki_pages
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, limit)) as unknown as WikiRow[];
+    return rows.map(toWikiPage);
+  }
+
+  getWikiPage(id: string): WikiPage | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, type, name, aliases, summary, items, sources, change_log,
+                created_at, updated_at, last_dreamed_at
+         FROM wiki_pages WHERE id = ? LIMIT 1`,
+      )
+      .get(id) as unknown as WikiRow | undefined;
+    return row ? toWikiPage(row) : null;
+  }
+
+  getWikiPageByName(name: string): WikiPage | null {
+    const key = wikiNameKey(name);
+    if (!key) return null;
+    const row = this.db
+      .prepare(
+        `SELECT id, type, name, aliases, summary, items, sources, change_log,
+                created_at, updated_at, last_dreamed_at
+         FROM wiki_pages WHERE name_key = ? LIMIT 1`,
+      )
+      .get(key) as unknown as WikiRow | undefined;
+    if (row) return toWikiPage(row);
+    return (
+      this.listWikiPages(500).find((page) =>
+        page.aliases.some((alias) => wikiNameKey(alias) === key),
+      ) ?? null
+    );
+  }
+
+  saveWikiPage(page: WikiPage): WikiPage {
+    // 显式写回一页时清掉同名 tombstone，允许用户将来手动恢复。
+    for (const name of [page.name, ...page.aliases]) {
+      this.clearWikiTombstone(name);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO wiki_pages
+           (id, type, name, name_key, aliases, summary, items, sources, change_log,
+            created_at, updated_at, last_dreamed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           type = excluded.type,
+           name = excluded.name,
+           name_key = excluded.name_key,
+           aliases = excluded.aliases,
+           summary = excluded.summary,
+           items = excluded.items,
+           sources = excluded.sources,
+           change_log = excluded.change_log,
+           updated_at = excluded.updated_at,
+           last_dreamed_at = excluded.last_dreamed_at`,
+      )
+      .run(
+        page.id,
+        page.type,
+        page.name,
+        wikiNameKey(page.name),
+        JSON.stringify(page.aliases),
+        page.summary,
+        JSON.stringify(page.items),
+        JSON.stringify(page.sources),
+        JSON.stringify(page.changeLog),
+        page.createdAt,
+        page.updatedAt,
+        page.lastDreamedAt ?? null,
+      );
+    return this.getWikiPage(page.id) ?? page;
+  }
+
+  deleteWikiPage(id: string): boolean {
+    const page = this.getWikiPage(id);
+    if (page) {
+      const now = Date.now();
+      const insert = this.db.prepare(
+        `INSERT INTO wiki_tombstones (name_key, name, deleted_at) VALUES (?, ?, ?)
+         ON CONFLICT(name_key) DO UPDATE SET deleted_at = excluded.deleted_at`,
+      );
+      for (const name of [page.name, ...page.aliases]) {
+        const key = wikiNameKey(name);
+        if (key) insert.run(key, name, now);
+      }
+    }
+    const result = this.db.prepare('DELETE FROM wiki_pages WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  isWikiNameTombstoned(name: string): boolean {
+    const key = wikiNameKey(name);
+    if (!key) return false;
+    const row = this.db
+      .prepare('SELECT name_key FROM wiki_tombstones WHERE name_key = ? LIMIT 1')
+      .get(key) as { name_key?: string } | undefined;
+    return Boolean(row?.name_key);
+  }
+
+  clearWikiTombstone(name: string): void {
+    const key = wikiNameKey(name);
+    if (key) this.db.prepare('DELETE FROM wiki_tombstones WHERE name_key = ?').run(key);
+  }
+
+  getWikiCount(): number {
+    return Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM wiki_pages').get() as { count: number })
+        .count,
+    );
+  }
+
+  searchWiki(query: string, limit = 6): WikiPage[] {
+    return searchWikiPages(this.listWikiPages(500), query, limit);
+  }
+
+  getWikiContext(query = '', limit = 4): string {
+    const chosen = new Map<string, WikiPage>();
+    for (const page of this.searchWiki(query, limit)) chosen.set(page.id, page);
+    if (chosen.size < limit) {
+      for (const page of this.listWikiPages(limit)) {
+        if (chosen.size >= limit) break;
+        chosen.set(page.id, page);
+      }
+    }
+    return formatWikiContext([...chosen.values()], limit);
+  }
+
+  // ------------------------------------------------------- proactive rules
+  getRules(includeInactive = true): ProactiveRule[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, label, decision, window_start, window_end, reason, source,
+                seen, active, created_at, updated_at
+         FROM proactive_rules
+         ${includeInactive ? '' : 'WHERE active = 1'}
+         ORDER BY active DESC, updated_at DESC`,
+      )
+      .all() as unknown as RuleRow[];
+    return rows.map(toRule);
+  }
+
+  getRule(id: string): ProactiveRule | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, kind, label, decision, window_start, window_end, reason, source,
+                seen, active, created_at, updated_at
+         FROM proactive_rules WHERE id = ? LIMIT 1`,
+      )
+      .get(id) as unknown as RuleRow | undefined;
+    return row ? toRule(row) : null;
+  }
+
+  saveRule(rule: ProactiveRule): ProactiveRule {
+    this.db
+      .prepare(
+        `INSERT INTO proactive_rules
+           (id, kind, label, decision, window_start, window_end, reason, source,
+            seen, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           label = excluded.label,
+           decision = excluded.decision,
+           window_start = excluded.window_start,
+           window_end = excluded.window_end,
+           reason = excluded.reason,
+           source = excluded.source,
+           seen = proactive_rules.seen + 1,
+           active = 1,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        rule.id,
+        rule.kind,
+        rule.label,
+        rule.decision,
+        rule.windowStart ?? null,
+        rule.windowEnd ?? null,
+        rule.reason,
+        rule.source,
+        rule.seen,
+        rule.active ? 1 : 0,
+        rule.createdAt,
+        rule.updatedAt,
+      );
+    return this.getRule(rule.id) ?? rule;
+  }
+
+  setRuleActive(id: string, active: boolean): boolean {
+    const result = this.db
+      .prepare('UPDATE proactive_rules SET active = ?, updated_at = ? WHERE id = ?')
+      .run(active ? 1 : 0, Date.now(), id);
+    return result.changes > 0;
+  }
+
+  deleteRule(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM proactive_rules WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  replaceDreamingRules(rules: ProactiveRule[]): number {
+    const protectedIds = new Set(
+      this.getRules()
+        .filter((rule) => rule.source !== 'dreaming')
+        .map((rule) => rule.id),
+    );
+    let saved = 0;
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare("DELETE FROM proactive_rules WHERE source = 'dreaming'").run();
+      for (const rule of rules) {
+        if (protectedIds.has(rule.id)) continue;
+        this.saveRule({ ...rule, source: 'dreaming' });
+        saved += 1;
+      }
+      this.db.exec('COMMIT');
+      return saved;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getClues(): ProactiveClue[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, label, decision, seen, note, first_seen_at, last_seen_at
+         FROM proactive_clues ORDER BY last_seen_at DESC`,
+      )
+      .all() as unknown as ClueRow[];
+    return rows.map(toClue);
+  }
+
+  replaceClues(clues: ProactiveClue[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO proactive_clues
+         (id, kind, label, decision, seen, note, first_seen_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM proactive_clues');
+      for (const clue of clues) {
+        insert.run(
+          clue.id,
+          clue.kind,
+          clue.label,
+          clue.decision,
+          clue.seen,
+          clue.note,
+          clue.firstSeenAt,
+          clue.lastSeenAt,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordProactiveDelivery(input: {
+    eventType: string;
+    text: string;
+    suppressed?: boolean;
+    at?: number;
+  }): ProactiveDelivery {
+    const delivery: ProactiveDelivery = {
+      id: randomUUID(),
+      eventType: input.eventType.trim().slice(0, 60) || 'unknown',
+      text: input.text.replace(/\s+/g, ' ').trim().slice(0, 500),
+      at: input.at ?? Date.now(),
+      outcome: 'none',
+      suppressed: Boolean(input.suppressed),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO proactive_deliveries
+           (id, event_type, text, outcome, suppressed, created_at)
+         VALUES (?, ?, ?, 'none', ?, ?)`,
+      )
+      .run(
+        delivery.id,
+        delivery.eventType,
+        delivery.text,
+        delivery.suppressed ? 1 : 0,
+        delivery.at,
+      );
+    // 账本留 90 天，足够夜间复盘和规则学习。
+    this.db
+      .prepare('DELETE FROM proactive_deliveries WHERE created_at < ?')
+      .run(delivery.at - 90 * 24 * 60 * 60_000);
+    return delivery;
+  }
+
+  getRecentProactiveDelivery(withinMs = 30 * 60_000): ProactiveDelivery | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, event_type, text, outcome, suppressed, created_at
+         FROM proactive_deliveries
+         WHERE suppressed = 0 AND outcome IN ('none', 'opened') AND created_at >= ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(Date.now() - withinMs) as unknown as DeliveryRow | undefined;
+    return row ? toDelivery(row) : null;
+  }
+
+  markDeliveryOutcome(outcome: Exclude<ProactiveOutcome, 'none'>): ProactiveDelivery | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, event_type, text, outcome, suppressed, created_at
+         FROM proactive_deliveries
+         WHERE suppressed = 0 AND outcome IN ('none', 'opened') AND created_at >= ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(Date.now() - 30 * 60_000) as unknown as DeliveryRow | undefined;
+    if (!row) return null;
+    this.db
+      .prepare('UPDATE proactive_deliveries SET outcome = ?, outcome_at = ? WHERE id = ?')
+      .run(outcome, Date.now(), row.id);
+    return { ...toDelivery(row), outcome };
+  }
+
+  getDeliveriesSince(since: number, limit = 40): ProactiveDelivery[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, event_type, text, outcome, suppressed, created_at
+         FROM proactive_deliveries
+         WHERE created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(since, Math.max(1, limit)) as unknown as DeliveryRow[];
+    return rows.map(toDelivery);
+  }
+
+  getDismissCountSince(eventType: string, since: number): number {
+    return Number(
+      (
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM feedback_events
+             WHERE event_type = ? AND action = 'dismiss' AND created_at >= ?`,
+          )
+          .get(eventType.trim().slice(0, 60), since) as { count: number }
+      ).count,
+    );
+  }
+
+  // -------------------------------------------------------------- reports
+  saveDailyReport(day: string, text: string): DailyReport {
+    const clean = text.replace(/\s+\n/g, '\n').trim().slice(0, 4000);
+    const createdAt = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO daily_reports (day, text, created_at) VALUES (?, ?, ?)
+         ON CONFLICT(day) DO UPDATE SET text = excluded.text, created_at = excluded.created_at`,
+      )
+      .run(day, clean, createdAt);
+    return { day, text: clean, createdAt };
+  }
+
+  getDailyReport(day = localDay()): DailyReport | null {
+    const row = this.db
+      .prepare('SELECT day, text, created_at FROM daily_reports WHERE day = ? LIMIT 1')
+      .get(day) as { day: string; text: string; created_at: number } | undefined;
+    return row ? { day: row.day, text: row.text, createdAt: Number(row.created_at) } : null;
+  }
+
+  getDailyReports(limit = 14): DailyReport[] {
+    const rows = this.db
+      .prepare('SELECT day, text, created_at FROM daily_reports ORDER BY day DESC LIMIT ?')
+      .all(Math.max(1, limit)) as unknown as Array<{
+      day: string;
+      text: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      day: row.day,
+      text: row.text,
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  startDreamRun(day = localDay()): DreamRun {
+    const run: DreamRun = {
+      id: randomUUID(),
+      day,
+      startedAt: Date.now(),
+      status: 'running',
+      pages: 0,
+      rules: 0,
+      message: '',
+    };
+    this.db
+      .prepare(
+        `INSERT INTO dream_runs (id, day, started_at, status, pages, rules, message)
+         VALUES (?, ?, ?, 'running', 0, 0, '')`,
+      )
+      .run(run.id, run.day, run.startedAt);
+    this.db
+      .prepare('DELETE FROM dream_runs WHERE started_at < ?')
+      .run(run.startedAt - 180 * 24 * 60 * 60_000);
+    return run;
+  }
+
+  finishDreamRun(
+    id: string,
+    patch: { status: DreamRun['status']; pages?: number; rules?: number; message?: string },
+  ): DreamRun | null {
+    this.db
+      .prepare(
+        `UPDATE dream_runs
+         SET finished_at = ?, status = ?, pages = ?, rules = ?, message = ?
+         WHERE id = ?`,
+      )
+      .run(
+        Date.now(),
+        patch.status,
+        patch.pages ?? 0,
+        patch.rules ?? 0,
+        (patch.message ?? '').slice(0, 500),
+        id,
+      );
+    const row = this.db
+      .prepare(
+        `SELECT id, day, started_at, finished_at, status, pages, rules, message
+         FROM dream_runs WHERE id = ? LIMIT 1`,
+      )
+      .get(id) as unknown as DreamRunRow | undefined;
+    return row ? toDreamRun(row) : null;
+  }
+
+  getLastDreamRun(): DreamRun | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, day, started_at, finished_at, status, pages, rules, message
+         FROM dream_runs ORDER BY started_at DESC LIMIT 1`,
+      )
+      .get() as unknown as DreamRunRow | undefined;
+    return row ? toDreamRun(row) : null;
+  }
+
+  getAgentMemory(): string {
+    const row = this.db
+      .prepare('SELECT text FROM agent_memory WHERE id = 1 LIMIT 1')
+      .get() as { text?: string } | undefined;
+    return row?.text ?? '';
+  }
+
+  setAgentMemory(text: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_memory (id, text, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`,
+      )
+      .run(text.slice(0, 8000), Date.now());
+  }
+
+  getMessageRowsSince(since: number, limit = 120): MessageRow[] {
+    // 取最近的 N 条，再按时间正序返回：夜间整理和反馈复盘都更关心最近说了什么。
+    return this.db
+      .prepare(
+        `SELECT id, role, text, created_at FROM (
+           SELECT id, role, text, created_at FROM messages
+           WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?
+         ) ORDER BY created_at ASC`,
+      )
+      .all(since, Math.max(1, limit)) as unknown as MessageRow[];
+  }
+
+  /**
+   * 夜间整理只拿“浓缩后的证据”：对话、锚点、活动、意图、主动消息反馈。
+   * 每条证据带 ref，模型写页面时必须引用这些 ref，避免编造来源。
+   */
+  getDreamEvidence(since: number, until = Date.now()): DreamEvidence {
+    const refs = new Map<string, WikiRef>();
+    const sections: string[] = [];
+    const clock = (at: number): string =>
+      new Date(at).toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+    const messages = this.getMessageRowsSince(since, 60).filter((row) => row.created_at <= until);
+    if (messages.length) {
+      const lines = messages.map((row) => {
+        const ref = `msg:${row.id}`;
+        refs.set(ref, {
+          label: `${clock(row.created_at)} ${row.role === 'user' ? '用户' : '同桌'}：${row.text.slice(0, 60)}`,
+          at: row.created_at,
+        });
+        return `- [${ref}] ${clock(row.created_at)} ${row.role === 'user' ? '用户' : '同桌'}：${row.text.slice(0, 220)}`;
+      });
+      sections.push(`## 对话\n${lines.join('\n')}`);
+    }
+
+    const anchors = this.db
+      .prepare(
+        `SELECT id, text, kind, created_at FROM anchors
+         WHERE created_at >= ? AND hidden = 0 ORDER BY created_at ASC LIMIT 20`,
+      )
+      .all(since) as unknown as Array<{
+      id: string;
+      text: string;
+      kind: string;
+      created_at: number;
+    }>;
+    if (anchors.length) {
+      const lines = anchors.map((row) => {
+        const ref = `anchor:${row.id}`;
+        refs.set(ref, { label: `锚点：${row.text.slice(0, 60)}`, at: Number(row.created_at) });
+        return `- [${ref}] ${row.kind}：${row.text}`;
+      });
+      sections.push(`## 今天的锚点\n${lines.join('\n')}`);
+    }
+
+    const commitments = this.db
+      .prepare(
+        `SELECT id, text, status, created_at FROM commitments
+         WHERE created_at >= ? ORDER BY created_at ASC LIMIT 20`,
+      )
+      .all(since) as unknown as Array<{
+      id: string;
+      text: string;
+      status: string;
+      created_at: number;
+    }>;
+    if (commitments.length) {
+      const lines = commitments.map((row) => {
+        const ref = `commit:${row.id}`;
+        refs.set(ref, { label: `承诺：${row.text.slice(0, 60)}`, at: Number(row.created_at) });
+        return `- [${ref}] ${row.status === 'done' ? '已完成' : '未完成'}：${row.text}`;
+      });
+      sections.push(`## 答应过的事\n${lines.join('\n')}`);
+    }
+
+    const intentions = this.db
+      .prepare(
+        `SELECT id, text, app, start_at, end_at FROM (
+           SELECT id, text, app, start_at, end_at FROM intentions
+           WHERE end_at >= ? ORDER BY end_at DESC LIMIT 30
+         ) ORDER BY end_at ASC`,
+      )
+      .all(since) as unknown as Array<{
+      id: string;
+      text: string;
+      app: string | null;
+      start_at: number;
+      end_at: number;
+    }>;
+    if (intentions.length) {
+      const lines = intentions.map((row) => {
+        const ref = `intent:${row.id}`;
+        refs.set(ref, { label: `意图：${row.text.slice(0, 60)}`, at: Number(row.end_at) });
+        return `- [${ref}] ${clock(Number(row.start_at))}–${clock(Number(row.end_at))} [${
+          row.app || '未知应用'
+        }] ${row.text}`;
+      });
+      sections.push(`## 意图（比原始活动高一层）\n${lines.join('\n')}`);
+    }
+
+    const activityRows = this.db
+      .prepare(
+        `SELECT id, at, app, title, activity, entity, change_note FROM activity_log
+         WHERE at >= ? ORDER BY at ASC LIMIT 20000`,
+      )
+      .all(since) as unknown as ActivityRow[];
+    if (activityRows.length) {
+      // 一天可能有上千条扫描；先压成“同应用同活动”的连续段，再均匀抽样，避免只看到早上。
+      const segments: Array<{
+        id: number;
+        start: number;
+        end: number;
+        app: string;
+        activity: string;
+        entity: string;
+        change: string;
+      }> = [];
+      for (const row of activityRows) {
+        const at = Number(row.at);
+        const app = row.app || '未知';
+        const activity = row.activity;
+        const entity = row.entity ?? '';
+        const last = segments[segments.length - 1];
+        if (
+          last &&
+          last.app === app &&
+          last.activity === activity &&
+          last.entity === entity &&
+          at - last.end <= 30 * 60_000
+        ) {
+          last.end = at;
+          if (row.change_note) last.change = row.change_note;
+          continue;
+        }
+        segments.push({
+          id: Number(row.id),
+          start: at,
+          end: at,
+          app,
+          activity,
+          entity,
+          change: row.change_note ?? '',
+        });
+      }
+
+      const maxSegments = 40;
+      const step = Math.max(1, Math.ceil(segments.length / maxSegments));
+      const sampled = segments.length > maxSegments ? segments.filter((_, index) => index % step === 0) : segments;
+      const lines = sampled.slice(0, maxSegments).map((segment) => {
+        const ref = `activity:${segment.id}`;
+        refs.set(ref, { label: `活动：${segment.activity.slice(0, 60)}`, at: segment.start });
+        const range = segment.start === segment.end ? clock(segment.start) : `${clock(segment.start)}–${clock(segment.end)}`;
+        const change = segment.change ? `（${segment.change}）` : '';
+        const entity = segment.entity ? ` @${segment.entity}` : '';
+        return `- [${ref}] ${range} [${segment.app}] ${segment.activity}${entity}${change}`;
+      });
+      sections.push(`## 屏幕活动\n${lines.join('\n')}`);
+    }
+
+    const corrections = this.db
+      .prepare(
+        `SELECT id, corrected_text, start_at, end_at FROM activity_corrections
+         WHERE end_at >= ? ORDER BY end_at ASC LIMIT 10`,
+      )
+      .all(since) as unknown as Array<{
+      id: string;
+      corrected_text: string;
+      start_at: number;
+      end_at: number;
+    }>;
+    if (corrections.length) {
+      const lines = corrections.map((row) => {
+        const ref = `correction:${row.id}`;
+        refs.set(ref, { label: `纠正：${row.corrected_text.slice(0, 60)}`, at: Number(row.end_at) });
+        return `- [${ref}] 用户纠正：${row.corrected_text}`;
+      });
+      sections.push(`## 用户纠正过的事实\n${lines.join('\n')}`);
+    }
+
+    const deliveries = this.getDeliveriesSince(since, 30).filter((item) => item.at <= until);
+    if (deliveries.length) {
+      const lines = deliveries.map((row) => {
+        const ref = `delivery:${row.id}`;
+        refs.set(ref, {
+          label: `${eventKindLabel(row.eventType)}：${row.text.slice(0, 60)}`,
+          at: row.at,
+        });
+        return `- [${ref}] ${clock(row.at)} ${row.eventType}（${row.outcome}${
+          row.suppressed ? '，已压住' : ''
+        }）：${row.text}`;
+      });
+      sections.push(`## 主动消息与用户反应\n${lines.join('\n')}`);
+    }
+
+    return {
+      since,
+      until,
+      text: sections.join('\n\n').slice(0, 18_000),
+      refs,
+    };
+  }
+
   exportData(): MemoryExport {
     return {
       exportedAt: Date.now(),
@@ -1097,6 +2219,8 @@ export class MemoryStore {
       anchors: this.getAnchors(undefined, 1000),
       commitments: this.getCommitments('all', 1000),
       companionDays: this.getCompanionDays(1000),
+      wikiPages: this.listWikiPages(500),
+      rules: this.getRules(),
     };
   }
 
@@ -1123,8 +2247,9 @@ export class MemoryStore {
     this.db
       .prepare(
         `INSERT INTO activity_log
-           (at, app, title, activity, display_names, confidence, capture_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (at, app, title, activity, display_names, confidence, capture_kind,
+            ocr_text, focus_text, change_note, entity)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         at,
@@ -1134,6 +2259,10 @@ export class MemoryStore {
         JSON.stringify((input.displayNames ?? []).slice(0, 4)),
         Math.min(1, Math.max(0, Number(input.confidence) || 0)),
         input.captureKind ?? null,
+        (input.ocrText ?? '').replace(/\r\n/g, '\n').slice(0, 12_000) || null,
+        normalize(input.focusText ?? '').slice(0, 2_000) || null,
+        normalize(input.changeNote ?? '').slice(0, 300) || null,
+        normalize(input.entity ?? '').slice(0, 120) || null,
       );
 
     const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
@@ -1142,6 +2271,148 @@ export class MemoryStore {
       DELETE FROM activity_log
       WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT 2000)
     `);
+  }
+
+  addIntention(input: IntentionInput): Intention | null {
+    const text = normalize(input.text).slice(0, 120);
+    if (!text) return null;
+    const startAt = Number(input.startAt) || Date.now();
+    const endAt = Math.max(startAt, Number(input.endAt) || startAt);
+    const intention: Intention = {
+      id: randomUUID(),
+      app: normalize(input.app ?? '').slice(0, 160),
+      title: normalize(input.title ?? '').slice(0, 240),
+      ...(normalize(input.entity ?? '') ? { entity: normalize(input.entity ?? '').slice(0, 120) } : {}),
+      text,
+      startAt,
+      endAt,
+      stepCount: Math.max(0, Math.round(Number(input.stepCount) || 0)),
+      confidence: Math.min(1, Math.max(0, Number(input.confidence) || 0.5)),
+      source: input.source === 'deepseek' ? 'deepseek' : 'local',
+      at: Date.now(),
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO intentions
+           (id, app, title, entity, text, start_at, end_at, step_count, confidence, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        intention.id,
+        intention.app || null,
+        intention.title || null,
+        intention.entity ?? null,
+        intention.text,
+        intention.startAt,
+        intention.endAt,
+        intention.stepCount,
+        intention.confidence,
+        intention.source,
+        intention.at,
+      );
+
+    this.db.exec(`
+      DELETE FROM intentions
+      WHERE id NOT IN (SELECT id FROM intentions ORDER BY created_at DESC LIMIT 500)
+    `);
+    return intention;
+  }
+
+  getRecentIntentions(limit = 5): Intention[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, app, title, entity, text, start_at, end_at, step_count, confidence, source, created_at
+         FROM intentions ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(Math.max(1, limit)) as unknown as IntentionRow[];
+    return rows.map(toIntention);
+  }
+
+  getIntentionsSince(since: number, limit = 200): Intention[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, app, title, entity, text, start_at, end_at, step_count, confidence, source, created_at
+         FROM intentions WHERE start_at >= ? ORDER BY start_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(Math.round(since), Math.max(1, limit)) as unknown as IntentionRow[];
+    return rows.map(toIntention);
+  }
+
+  /** 当前正在进行的意图：最后一段还没结束太久，就当它还在。 */
+  getCurrentIntention(withinMs = 30 * 60_000): Intention | null {
+    const [latest] = this.getRecentIntentions(1);
+    if (!latest) return null;
+    return Date.now() - latest.endAt <= withinMs ? latest : null;
+  }
+
+  countIntentionsSince(since: number): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS count FROM intentions WHERE start_at >= ?')
+      .get(Math.round(since)) as unknown as { count: number } | undefined;
+    return Number(row?.count) || 0;
+  }
+
+  addIntentionPrediction(input: IntentionPredictionInput): IntentionPrediction {
+    const prediction: IntentionPrediction = {
+      id: randomUUID(),
+      text: normalize(input.text).slice(0, 120),
+      app: normalize(input.app ?? '').slice(0, 160),
+      confidence: Math.min(1, Math.max(0, Number(input.confidence) || 0)),
+      decision: input.decision === 'push' ? 'push' : 'discard',
+      reason: normalize(input.reason ?? '').slice(0, 120),
+      at: Date.now(),
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO intention_predictions
+           (id, text, app, confidence, decision, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        prediction.id,
+        prediction.text,
+        prediction.app || null,
+        prediction.confidence,
+        prediction.decision,
+        prediction.reason,
+        prediction.at,
+      );
+
+    this.db.exec(`
+      DELETE FROM intention_predictions
+      WHERE id NOT IN (SELECT id FROM intention_predictions ORDER BY created_at DESC LIMIT 200)
+    `);
+    return prediction;
+  }
+
+  getLatestPrediction(): IntentionPrediction | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, text, app, confidence, decision, reason, created_at, outcome, outcome_at
+         FROM intention_predictions ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get() as unknown as IntentionPredictionRow | undefined;
+    return row ? toIntentionPrediction(row) : null;
+  }
+
+  setIntentionOutcome(id: string, outcome: IntentionOutcome): void {
+    this.db
+      .prepare('UPDATE intention_predictions SET outcome = ?, outcome_at = ? WHERE id = ?')
+      .run(outcome, Date.now(), id);
+  }
+
+  /** 最近被否掉的猜测，用来避免“换个说法再猜一遍”。 */
+  getRejectedPredictions(since: number, limit = 10): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT text FROM intention_predictions
+         WHERE outcome = 'rejected' AND created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(Math.round(since), Math.max(1, limit)) as unknown as Array<{ text: string }>;
+    return rows.map((row) => row.text);
   }
 
   addCorrection(input: ActivityCorrectionInput): string | null {
@@ -1188,19 +2459,23 @@ export class MemoryStore {
       .all(since) as unknown as CorrectionRow[];
   }
 
-  getActivityContext(minutes = 120, limit = 30): string {
+  getActivityContext(minutes = 120, limit = 30, daysAgo = 0): string {
     const windowMinutes = Math.min(24 * 60, Math.max(5, Math.round(minutes)));
-    const since = Date.now() - windowMinutes * 60_000;
-    const corrections = this.getCorrectionsSince(since);
+    const offsetDays = Math.min(14, Math.max(0, Math.round(daysAgo)));
+    const until = Date.now() - offsetDays * 24 * 60 * 60_000;
+    const since = until - windowMinutes * 60_000;
+    const corrections = this.getCorrectionsSince(since).filter(
+      (correction) => correction.start_at <= until,
+    );
     const rows = this.db
       .prepare(
         `SELECT at, app, title, activity, display_names, confidence, capture_kind
          FROM activity_log
-         WHERE at >= ?
+         WHERE at >= ? AND at <= ?
          ORDER BY at ASC
          LIMIT 1000`,
       )
-      .all(since) as unknown as ObservationRow[];
+      .all(since, until) as unknown as ObservationRow[];
 
     const segments: TimelineSegment[] = [];
     for (const row of rows) {
@@ -1290,7 +2565,15 @@ export class MemoryStore {
   }
 
   clear(): void {
-    this.db.exec('DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; DELETE FROM feedback_mutes; DELETE FROM activity_log; DELETE FROM activity_corrections;');
+    this.db.exec(
+      'DELETE FROM facts; DELETE FROM messages; DELETE FROM anchors; DELETE FROM commitments; '
+        + 'DELETE FROM companion_days; DELETE FROM auto_anchor_events; DELETE FROM feedback_events; '
+        + 'DELETE FROM feedback_mutes; DELETE FROM activity_log; DELETE FROM activity_corrections; '
+        + 'DELETE FROM intentions; DELETE FROM intention_predictions; DELETE FROM wiki_pages; '
+        + 'DELETE FROM proactive_rules; DELETE FROM proactive_clues; DELETE FROM proactive_deliveries; '
+        + 'DELETE FROM daily_reports; DELETE FROM dream_runs; DELETE FROM agent_memory; '
+        + 'DELETE FROM wiki_tombstones;',
+    );
     this.secureFiles();
   }
 

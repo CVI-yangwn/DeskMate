@@ -6,6 +6,7 @@ import {
   Menu,
   nativeImage,
   screen,
+  shell,
   Tray,
 } from 'electron';
 import fs from 'node:fs';
@@ -13,6 +14,7 @@ import path from 'node:path';
 import type {
   ChatMessage,
   DemoState,
+  DreamRun,
   HitRect,
   MemoryExport,
   ScanResult,
@@ -42,6 +44,7 @@ let hitRect: HitRect = { x: 0, y: 0, w: 0, h: 0 };
 let avatarDragging = false;
 let hitTimer: NodeJS.Timeout | null = null;
 let scanTimer: NodeJS.Timeout | null = null;
+let dreamTimer: NodeJS.Timeout | null = null;
 let foregroundTimer: NodeJS.Timeout | null = null;
 let lastForegroundKey = '';
 let eventBridge: EventBridge | null = null;
@@ -153,13 +156,57 @@ function performUtterance(
   plan: UtterancePlan,
   state: DemoState,
   source: 'deepseek' | 'mock',
-  origin: 'scan' | 'proactive' | 'demo',
+  origin: 'scan' | 'proactive' | 'demo' | 'dream',
   eventType = 'unknown',
 ): UtterancePayload {
   const speakingMs = brain.isVoiceEnabled() && plan.say ? brain.speak(plan.speechText) : 0;
   const payload: UtterancePayload = { plan, state, speakingMs, source, origin, eventType };
   sendToAll('avatar:perform', payload);
   return payload;
+}
+
+function announceDream(run: DreamRun): void {
+  if (run.status !== 'ok') return;
+  if (run.pages === 0 && run.rules === 0) return;
+  if (brain.isDnd() || brain.isQuietNow()) return;
+  const bits = [
+    run.pages ? `${run.pages} 页知识` : '',
+    run.rules ? `${run.rules} 条提醒规则` : '',
+  ].filter(Boolean);
+  if (bits.length === 0) return;
+  const text = `我把今天的记忆整理好了：${bits.join('、')}。`;
+  performUtterance(
+    {
+      say: true,
+      displayText: text,
+      speechText: text,
+      emotion: 'smile',
+      motion: 'nod',
+      urgency: 'low',
+      evidenceIds: ['dream'],
+      reason: '夜间整理完成',
+    },
+    brain.getStatus().state,
+    brain.getStatus().apiStatus === 'ok' ? 'deepseek' : 'mock',
+    'dream',
+    'dream',
+  );
+}
+
+async function checkDreaming(): Promise<void> {
+  try {
+    const run = await brain.maybeRunDreaming();
+    if (run) announceDream(run);
+  } catch (error) {
+    console.warn('夜间整理失败', error);
+  }
+}
+
+function startDreamLoop(): void {
+  // 启动后先让扫描/问候跑起来，再检查昨晚是否漏了整理。
+  setTimeout(() => void checkDreaming(), 15_000);
+  if (dreamTimer) clearInterval(dreamTimer);
+  dreamTimer = setInterval(() => void checkDreaming(), 5 * 60_000);
 }
 
 function sendScanStartBubble(): void {
@@ -343,6 +390,29 @@ function memoryExportMarkdown(data: MemoryExport): string {
     ].filter(Boolean);
     if (bits.length) lines.push(`- ${day.day}：${bits.join('；')}`);
   }
+
+  lines.push('', '## 个人 wiki');
+  if (data.wikiPages.length === 0) lines.push('（暂无）');
+  for (const page of data.wikiPages) {
+    lines.push(
+      '',
+      `### ${page.name}（${page.type}）`,
+      '',
+      page.summary,
+      '',
+      ...page.items.map((item) => `- [${item.status === 'done' ? 'x' : ' '}] ${item.text}`),
+    );
+  }
+
+  lines.push('', '## 学到的提醒规则');
+  if (data.rules.length === 0) lines.push('（暂无）');
+  for (const rule of data.rules) {
+    lines.push(
+      `- ${rule.label} · ${rule.kind} · ${rule.decision}${
+        rule.windowStart ? ` · ${rule.windowStart}-${rule.windowEnd}` : ''
+      }${rule.active ? '' : '（已暂停）'}`,
+    );
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -398,6 +468,10 @@ function registerIpc(): void {
     brain.updateFact(String(id), String(text), kind),
   );
   ipcMain.handle('companion:today', () => brain.getCompanionToday());
+  ipcMain.handle('intentions:view', () => brain.getIntentions());
+  ipcMain.handle('intentions:feedback', (_event, id: string, outcome: string) =>
+    brain.recordIntentionFeedback(String(id), outcome === 'accepted' ? 'accepted' : 'rejected'),
+  );
   ipcMain.handle('companion:add-anchor', (_event, text: string, kind?: string) =>
     brain.addAnchor(
       String(text),
@@ -465,6 +539,30 @@ function registerIpc(): void {
   ipcMain.handle('settings:set-privacy', (_event, apps: string[]) =>
     brain.setPrivacySettings(Array.isArray(apps) ? apps : []),
   );
+  ipcMain.handle('settings:set-dreaming', (_event, enabled: boolean, at: string) =>
+    brain.setDreaming(Boolean(enabled), String(at)),
+  );
+  ipcMain.handle('settings:set-proactive-learning', (_event, enabled: boolean) =>
+    brain.setProactiveLearning(Boolean(enabled)),
+  );
+  ipcMain.handle('knowledge:view', () => brain.getKnowledge());
+  ipcMain.handle('knowledge:dream', async () => {
+    const run = await brain.runDreaming(true);
+    announceDream(run);
+    return run;
+  });
+  ipcMain.handle('knowledge:delete-page', (_event, id: string) =>
+    brain.deleteWikiPage(String(id)),
+  );
+  ipcMain.handle('knowledge:set-rule', (_event, id: string, active: boolean) =>
+    brain.setRuleActive(String(id), Boolean(active)),
+  );
+  ipcMain.handle('knowledge:delete-rule', (_event, id: string) => brain.deleteRule(String(id)));
+  ipcMain.handle('knowledge:open-folder', async () => {
+    const dir = brain.getKnowledge().wikiDir;
+    await shell.openPath(dir);
+    return dir;
+  });
 
   ipcMain.handle('panel:open', () => {
     showPanel();
@@ -557,6 +655,7 @@ app.whenReady().then(async () => {
   }
 
   startPerceptionLoop();
+  startDreamLoop();
 
   // 启动后先露个面，让用户知道搭子在。
   setTimeout(sendStartupGreeting, 2500);
@@ -584,6 +683,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (hitTimer) clearInterval(hitTimer);
   if (scanTimer) clearTimeout(scanTimer);
+  if (dreamTimer) clearInterval(dreamTimer);
   if (foregroundTimer) clearInterval(foregroundTimer);
   void eventBridge?.close();
 });

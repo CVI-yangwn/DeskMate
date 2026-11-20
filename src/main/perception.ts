@@ -1,6 +1,7 @@
 import { desktopCapturer, powerMonitor, screen, systemPreferences } from 'electron';
 import type { Display, NativeImage } from 'electron';
 import { activeWindow, openWindows } from 'get-windows';
+import { readFocusedText } from './ax';
 import type { ScreenStatus } from '../shared/types';
 
 export interface WindowBounds {
@@ -142,9 +143,18 @@ function sourceWindowId(sourceId: string): string | null {
   return match?.[1] ?? null;
 }
 
+// openWindows() 一旦开始超时，每轮扫描都会白等 5 秒；熔断几分钟。
+let openWindowsMutedUntil = 0;
+
 export async function readOpenWindows(): Promise<ActiveWindowInfo[]> {
+  if (Date.now() < openWindowsMutedUntil) return [];
   try {
-    const windows = await withTimeout(openWindows(), 5_000, []);
+    const windows = await withTimeout(openWindows(), 5_000, null);
+    if (!windows) {
+      openWindowsMutedUntil = Date.now() + 5 * 60_000;
+      console.info('[perception] openWindows 超时，暂停 5 分钟（隐私回退暂时只覆盖前台）');
+      return [];
+    }
     return windows
       .filter((candidate) => !isSelfWindow(candidate.owner.name, candidate.title))
       .map(toInfo);
@@ -153,7 +163,24 @@ export async function readOpenWindows(): Promise<ActiveWindowInfo[]> {
   }
 }
 
+/**
+ * get-windows 在这台机器上偶尔会卡满超时（4s + 5s），一次扫描白等 9 秒。
+ * 先用 native/ax 走快路：一次调用 ~几十毫秒，还能顺带给出窗口位置。
+ */
+async function readActiveWindowNative(): Promise<ActiveWindowInfo | null> {
+  const info = await withTimeout(readFocusedText(), 2_500, null);
+  if (!info?.app) return null;
+  return {
+    app: info.app,
+    title: info.title ?? '',
+    ...(info.bounds ? { bounds: info.bounds } : {}),
+  };
+}
+
 export async function readActiveWindow(): Promise<ActiveWindowInfo | null> {
+  const native = await readActiveWindowNative();
+  if (native) return native;
+
   try {
     const win = await withTimeout(activeWindow(), 4_000, null);
     if (win && !isSelfWindow(win.owner.name, win.title)) {

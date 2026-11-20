@@ -7,7 +7,11 @@ import type {
   ChatReply,
   CompanionToday,
   DeskMateApi,
+  DreamRun,
   HitRect,
+  IntentionOutcome,
+  IntentionView,
+  KnowledgeView,
   MemoryFact,
   SayVoice,
   ScanResult,
@@ -36,6 +40,11 @@ const api: DeskMateApi = {
 
   getCompanionToday: () =>
     ipcRenderer.invoke('companion:today') as Promise<CompanionToday>,
+
+  getIntentions: () => ipcRenderer.invoke('intentions:view') as Promise<IntentionView>,
+
+  sendIntentionFeedback: (id: string, outcome: IntentionOutcome) =>
+    ipcRenderer.invoke('intentions:feedback', id, outcome) as Promise<IntentionView>,
 
   addAnchor: (text: string, kind?: 'work' | 'feeling' | 'open_loop' | 'moment') =>
     ipcRenderer.invoke('companion:add-anchor', text, kind) as Promise<CompanionToday>,
@@ -68,6 +77,28 @@ const api: DeskMateApi = {
 
   setQuietHours: (enabled: boolean, start: string, end: string) =>
     ipcRenderer.invoke('settings:set-quiet-hours', enabled, start, end) as Promise<AppStatus>,
+
+  setDreaming: (enabled: boolean, at: string) =>
+    ipcRenderer.invoke('settings:set-dreaming', enabled, at) as Promise<AppStatus>,
+
+  setProactiveLearning: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-proactive-learning', enabled) as Promise<AppStatus>,
+
+  getKnowledge: () => ipcRenderer.invoke('knowledge:view') as Promise<KnowledgeView>,
+
+  runDreaming: () => ipcRenderer.invoke('knowledge:dream') as Promise<DreamRun>,
+
+  deleteWikiPage: (id: string) =>
+    ipcRenderer.invoke('knowledge:delete-page', id) as Promise<KnowledgeView>,
+
+  setRuleActive: (id: string, active: boolean) =>
+    ipcRenderer.invoke('knowledge:set-rule', id, active) as Promise<KnowledgeView>,
+
+  deleteRule: (id: string) =>
+    ipcRenderer.invoke('knowledge:delete-rule', id) as Promise<KnowledgeView>,
+
+  openKnowledgeFolder: () =>
+    ipcRenderer.invoke('knowledge:open-folder') as Promise<string>,
 
   exportMemory: () => ipcRenderer.invoke('memory:export') as Promise<string | null>,
 
