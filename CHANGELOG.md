@@ -13,7 +13,7 @@
 
 ---
 
-## 未发布 · 2026-11-20 — 记忆隐私、删除与证据硬化
+## 2026-11-20 — 记忆隐私、删除与证据硬化（`3931b50`）
 
 > 起因：对 Anthropic 四层记忆设计的辩论结论是“不做四层，先修已经暴露的隐私/删除/留存问题”。
 > 基线 commit：`bed3aba`（intent 层 + knowledge base + skills 的检查点）。
@@ -59,7 +59,7 @@ npm run eval:memory
 
 ---
 
-## 未发布 · 2026-11-20 — 从 Linger 吸收：知识库、夜间整理、提醒规则、技能
+## 2026-11-20 — 从 Linger 吸收：知识库、夜间整理、提醒规则、技能（`bed3aba`）
 
 > 参考：[simplexai-labs/linger](https://github.com/simplexai-labs/linger) `c8564ed`。只吸收 agent harness / 产品层，不碰本地模型。
 > 设计说明：[Linger 架构对照](docs/linger-lessons.zh-CN.md) · 实现说明：[知识库与夜间整理](docs/knowledge-and-dreaming.zh-CN.md)
@@ -111,10 +111,10 @@ npm run build
 
 ---
 
-## 未提交 · 2026-11-16 — 意图层与可信感知
+## 2026-11-16 — 意图层与可信感知（随 `bed3aba` 检查点）
 
 > 设计说明：[意图层](docs/intent-layer.zh-CN.md) · [光标上下文](docs/caret-context.zh-CN.md)
-> 这一批文件在 `git status` 中仍是未跟踪/未提交状态。
+
 
 ### 新增
 
