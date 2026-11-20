@@ -28,7 +28,7 @@ function loadRoute(win: BrowserWindow, route: 'avatar' | 'panel'): void {
 export function createAvatarWindow(): BrowserWindow {
   if (avatarWindow && !avatarWindow.isDestroyed()) return avatarWindow;
 
-  avatarWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 240,
     height: 360,
     show: false,
@@ -49,28 +49,49 @@ export function createAvatarWindow(): BrowserWindow {
       backgroundThrottling: false,
     },
   });
+  avatarWindow = win;
 
-  avatarWindow.setAlwaysOnTop(true, 'screen-saver');
-  avatarWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  avatarWindow.setIgnoreMouseEvents(true, { forward: true });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.setIgnoreMouseEvents(true, { forward: true });
 
-  avatarWindow.once('ready-to-show', () => {
-    avatarWindow?.showInactive();
+  win.once('ready-to-show', () => {
+    win.showInactive();
     positionAvatarWindow();
   });
 
-  avatarWindow.on('closed', () => {
-    avatarWindow = null;
+  win.on('closed', () => {
+    if (avatarWindow === win) avatarWindow = null;
   });
 
-  loadRoute(avatarWindow, 'avatar');
-  return avatarWindow;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (quitting) return;
+    console.warn('avatar renderer gone, recreating', details.reason);
+    if (avatarWindow === win) avatarWindow = null;
+    try {
+      win.destroy();
+    } catch {
+      // window may already be gone
+    }
+    setTimeout(() => {
+      if (!quitting) {
+        createAvatarWindow();
+        positionAvatarWindow();
+      }
+    }, 300);
+  });
+  win.webContents.on('unresponsive', () => {
+    if (!quitting) win.reload();
+  });
+
+  loadRoute(win, 'avatar');
+  return win;
 }
 
 export function createPanelWindow(): BrowserWindow {
   if (panelWindow && !panelWindow.isDestroyed()) return panelWindow;
 
-  panelWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 480,
     height: 840,
     minWidth: 380,
@@ -86,20 +107,30 @@ export function createPanelWindow(): BrowserWindow {
       sandbox: false,
     },
   });
+  panelWindow = win;
 
-  panelWindow.on('close', (event) => {
+  win.on('close', (event) => {
     if (!quitting) {
       event.preventDefault();
-      panelWindow?.hide();
+      win.hide();
     }
   });
 
-  panelWindow.on('closed', () => {
-    panelWindow = null;
+  win.on('closed', () => {
+    if (panelWindow === win) panelWindow = null;
   });
 
-  loadRoute(panelWindow, 'panel');
-  return panelWindow;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (quitting) return;
+    console.warn('panel renderer gone, reloading', details.reason);
+    win.reload();
+  });
+  win.webContents.on('unresponsive', () => {
+    if (!quitting) win.reload();
+  });
+
+  loadRoute(win, 'panel');
+  return win;
 }
 
 export function getAvatarWindow(): BrowserWindow | null {

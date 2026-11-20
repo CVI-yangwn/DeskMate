@@ -174,3 +174,64 @@ test('messages 按 7 天和 1000 条双上限保留', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('旧库升级前备份，迁移清掉 OCR 正文并把明文 tombstone 哈希化', () => {
+  const { dir, store } = createStore();
+  try {
+    const db = new DatabaseSync(path.join(dir, 'memory.db'));
+    db.exec('PRAGMA user_version = 0');
+    db.prepare(
+      `INSERT INTO activity_log (at, app, activity, ocr_text, focus_text)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(Date.now(), 'Xcode', '修改 auth', 'legacy-secret-ocr', 'legacy-secret-focus');
+    db.prepare(
+      'INSERT INTO wiki_tombstones (name_key, name, deleted_at) VALUES (?, ?, ?)',
+    ).run('客户 X', '客户 X', Date.now());
+    db.close();
+
+    const reopened = new MemoryStore(dir);
+    assert.equal(reopened.isWikiNameTombstoned('客户 X'), true);
+
+    const backups = fs.readdirSync(dir).filter((name) => name.startsWith('memory.db.bak-v'));
+    assert.ok(backups.length >= 1);
+
+    const check = new DatabaseSync(path.join(dir, 'memory.db'));
+    const version = check.prepare('PRAGMA user_version').get();
+    const activity = check
+      .prepare('SELECT ocr_text, focus_text FROM activity_log ORDER BY id DESC LIMIT 1')
+      .get();
+    const tombstone = check.prepare('SELECT name_key, name FROM wiki_tombstones').get();
+    check.close();
+
+    assert.equal(Number(version.user_version), 2);
+    assert.equal(activity.ocr_text, null);
+    assert.equal(activity.focus_text, null);
+    assert.equal(tombstone.name, '');
+    assert.match(tombstone.name_key, /^[0-9a-f]{64}$/);
+    store.clear();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('facts 超过 100 时先删自动事实，保留 explicit', () => {
+  const { dir, store } = createStore();
+  try {
+    for (let index = 0; index < 100; index += 1) {
+      store.remember(`自动事实 ${index}`, 'fact', { source: 'auto', confidence: 0.5 });
+    }
+    const explicit = store.remember('记住：项目用 pnpm', 'preference', {
+      source: 'explicit',
+      confidence: 1,
+    });
+    assert.ok(explicit);
+    assert.equal(store.getFacts(200).length, 100);
+    assert.equal(
+      store.getFacts(200).some((fact) => fact.id === explicit.id),
+      true,
+    );
+    store.clear();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

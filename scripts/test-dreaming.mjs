@@ -200,3 +200,24 @@ test('删除页面会留 tombstone，夜间整理不会自动复活', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('整理途中用户清空记忆时会中止写回', async () => {
+  const { dir, store } = createStore();
+  try {
+    seed(store);
+    const messages = store.getMessageRowsSince(0);
+    const run = await runDreaming({
+      store,
+      client: fakeClient(messages),
+      userDataDir: dir,
+      now: () => Date.now(),
+      force: true,
+      shouldAbort: () => true,
+    });
+    assert.equal(run.status, 'skipped');
+    assert.equal(store.listWikiPages().length, 0);
+    assert.equal(store.getDailyReports().length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

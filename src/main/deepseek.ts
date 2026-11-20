@@ -852,6 +852,7 @@ ${assistantReply}
    * 便宜、稳定，也逼模型按行为下结论，而不是按画面猜。
    */
   async labelIntention(segmentText: string): Promise<{ intention: string; confidence: number }> {
+    const safeSegment = redactSensitive(segmentText);
     const data = await this.post({
       model: this.env.model,
       thinking: { type: 'disabled' },
@@ -871,7 +872,7 @@ ${assistantReply}
 
 输出 JSON：{"intention":"...","confidence":0.0}`,
         },
-        { role: 'user', content: segmentText },
+        { role: 'user', content: safeSegment },
       ],
     });
 

@@ -643,7 +643,7 @@ export default function PanelApp() {
 
   async function clearMemory() {
     if (memoryBusy) return;
-    if (!window.confirm('清除全部长期记忆和聊天记录？')) return;
+    if (!window.confirm('清除全部长期记忆、聊天记录、wiki、提醒规则和知识文件？此操作不可撤销。')) return;
     setMemoryBusy(true);
     try {
       const next = await window.deskmate.clearMemory();
@@ -1837,7 +1837,7 @@ export default function PanelApp() {
                 <button
                   className="text-button danger"
                   onClick={() => void clearMemory()}
-                  disabled={memoryBusy || facts.length === 0}
+                  disabled={memoryBusy}
                 >
                   清空全部
                 </button>

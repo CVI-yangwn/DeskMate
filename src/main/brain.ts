@@ -97,6 +97,7 @@ import { SkillRegistry } from './skills';
 import { runDreaming } from './dreaming';
 import { speakWithSay } from './tts';
 import { formatWikiPage, wikiDirectory } from './wiki';
+import { redactSensitive } from './redact';
 
 const SPEECH_COOLDOWN_MS = 2 * 60_000;
 
@@ -195,6 +196,7 @@ export class BrainService {
   // 知识层：本地技能目录 + 夜间整理的单飞锁。
   private readonly skills: SkillRegistry;
   private dreamInFlight: Promise<unknown> | null = null;
+  private dreamEpoch = 0;
   private lastDreamCheckAt = 0;
 
   constructor() {
@@ -335,12 +337,14 @@ export class BrainService {
   /** 手动“现在整理”：跳过当天已整理的检查，允许重跑。 */
   async runDreaming(force = true): Promise<DreamRun> {
     if (this.dreamInFlight) return this.dreamInFlight as Promise<DreamRun>;
+    const epoch = this.dreamEpoch;
     const task = runDreaming({
       store: this.memory,
       client: this.client,
       userDataDir: app.getPath('userData'),
       force,
       maxPages: 5,
+      shouldAbort: () => this.dreamEpoch !== epoch,
     })
       .then((run) => {
         if (run.status === 'ok' && run.pages > 0) {
@@ -595,6 +599,8 @@ export class BrainService {
   }
 
   clearMemory(): AppStatus {
+    // 先让正在跑的夜间整理失效，避免它整理完后又把旧页面/摘要写回来。
+    this.dreamEpoch += 1;
     this.memory.clear();
     this.lastSpokenAt = 0;
     this.lastSpokenText = '';
@@ -912,9 +918,9 @@ export class BrainService {
       inspection.testStatus = ocrTest;
     }
 
-    const evidence = [...inspection.evidence];
+    const evidence = inspection.evidence.map((item) => redactSensitive(item));
     for (const item of inspection.ambient ?? []) {
-      if (item.trim()) evidence.push(`环境: ${item.trim().slice(0, 60)}`);
+      if (item.trim()) evidence.push(`环境: ${redactSensitive(item.trim().slice(0, 60))}`);
     }
     const ocrPreview = ocrResults
       .flatMap((result) => result?.lines ?? [])
@@ -923,9 +929,13 @@ export class BrainService {
       .map((line) => line.text)
       .join(' | ')
       .slice(0, 220);
-    if (ocrPreview) evidence.push(`OCR: ${ocrPreview}`);
-    if (focusText) evidence.push(`光标处: ${focusText.replace(/\s+/g, ' ').slice(0, 80)}`);
-    if (this.lastChangeNote) evidence.push(`变化: ${this.lastChangeNote.slice(0, 80)}`);
+    if (ocrPreview) evidence.push(`OCR: ${redactSensitive(ocrPreview)}`);
+    if (focusText) {
+      evidence.push(`光标处: ${redactSensitive(focusText.replace(/\s+/g, ' ').slice(0, 80))}`);
+    }
+    if (this.lastChangeNote) {
+      evidence.push(`变化: ${redactSensitive(this.lastChangeNote.slice(0, 80))}`);
+    }
 
     evidence.push(
       frames.length > 1
@@ -1602,13 +1612,8 @@ export class BrainService {
   }
 
   async simulateTest(result: 'pass' | 'fail'): Promise<UtterancePayload> {
-    this.state = {
-      ...this.state,
-      testResult: result,
-      lastUpdated: Date.now(),
-      focusMin: result === 'pass' ? this.state.focusMin + 1 : this.state.focusMin,
-    };
-
+    // 演示只产生一次气泡/语音，不改真实 state、不写锚点/活动；
+    // 否则用户点一下“模拟通过”，面板会一直显示“通过”，像真的跑过测试。
     const event =
       result === 'pass'
         ? `test-pass: 手动模拟测试从失败变为通过`

@@ -58,6 +58,8 @@ export interface DreamingOptions {
   now?: () => number;
   force?: boolean;
   maxPages?: number;
+  /** 用户在整理途中清空记忆时返回 true，后续不再写回。 */
+  shouldAbort?: () => boolean;
 }
 
 const MAX_PAGES = 5;
@@ -327,6 +329,14 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
   }
 
   const run = store.startDreamRun(day);
+  const aborted = (): boolean => options.shouldAbort?.() === true;
+  const finishAborted = (): DreamRun =>
+    store.finishDreamRun(run.id, {
+      status: 'skipped',
+      pages: 0,
+      rules: 0,
+      message: '用户清空了记忆，本次整理已中止',
+    }) ?? { ...run, status: 'skipped', message: '整理已中止' };
   const since = Math.max(now - 7 * 24 * 60 * 60_000, last?.finishedAt ?? now - 24 * 60 * 60_000);
   const pages = store.listWikiPages(200);
   const existingRules = store.getRules();
@@ -353,6 +363,8 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
       notes.push('证据较少，本次只做规则和摘要维护');
     }
 
+    if (aborted()) return finishAborted();
+
     if (client.configured && hasEvidence) {
       let candidates: WikiEntityCandidate[] = [];
       try {
@@ -365,6 +377,7 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
         (ref) => ref.startsWith('msg:') || ref.startsWith('anchor:') || ref.startsWith('intent:'),
       );
       for (const candidate of candidates.slice(0, options.maxPages ?? MAX_PAGES)) {
+        if (aborted()) return finishAborted();
         try {
           const existing =
             (candidate.existingPageId ? store.getWikiPage(candidate.existingPageId) : null) ??
@@ -380,6 +393,7 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
             existing,
             registry,
           });
+          if (aborted()) return finishAborted();
           const result = applyWikiDraft(existing, draft, evidence.refs, now);
           const saved = store.saveWikiPage(result.page);
           writeWikiFile(userDataDir, saved);
@@ -409,6 +423,7 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
         }
       }
 
+      if (aborted()) return finishAborted();
       const deliveries = store.getDeliveriesSince(since, 40);
       if (deliveries.length === 0 && store.getClues().length === 0) {
         // 没有主动消息就没有反馈可学；不要用空结果覆盖已有规则。
@@ -465,6 +480,7 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
         notes.push(`日结生成失败，已用本地整理：${error instanceof Error ? error.message.slice(0, 80) : ''}`);
       }
     }
+    if (aborted()) return finishAborted();
     store.saveDailyReport(day, digest);
 
     let summary = localAgentSummary(store, updatedPages, updatedRules);
@@ -482,6 +498,7 @@ export async function runDreaming(options: DreamingOptions): Promise<DreamRun> {
         notes.push(`记忆摘要生成失败，已用本地整理：${error instanceof Error ? error.message.slice(0, 80) : ''}`);
       }
     }
+    if (aborted()) return finishAborted();
     store.setAgentMemory(summary);
     writeAgentMemoryFiles(userDataDir, store, summary);
 

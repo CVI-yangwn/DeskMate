@@ -661,9 +661,34 @@ export class MemoryStore {
     this.db.exec('PRAGMA busy_timeout = 3000');
     // 删除后尽量不把旧页留在 freelist 里，配合 VACUUM 降低 strings 捡漏。
     this.db.exec('PRAGMA secure_delete = ON');
+    this.backupBeforeMigration();
     this.migrateSchema();
     this.migrateLegacyJson();
     this.secureFiles();
+  }
+
+  /** 旧库升级前留一份原始备份；升级会清掉历史 OCR/光标正文，必须可回退。 */
+  private backupBeforeMigration(): void {
+    try {
+      const hasFacts = this.db
+        .prepare("SELECT 1 AS hit FROM sqlite_master WHERE type = 'table' AND name = 'facts' LIMIT 1")
+        .get() as { hit?: number } | undefined;
+      if (!hasFacts?.hit) return;
+      const versionRow = this.db.prepare('PRAGMA user_version').get() as
+        | { user_version?: number }
+        | undefined;
+      const version = Number(versionRow?.user_version ?? 0);
+      if (version >= SCHEMA_VERSION) return;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backup = `${this.dbPath}.bak-v${version}-${stamp}`;
+      for (const suffix of ['', '-wal', '-shm']) {
+        const source = `${this.dbPath}${suffix}`;
+        if (fs.existsSync(source)) fs.copyFileSync(source, `${backup}${suffix}`);
+      }
+      console.info(`[memory] 升级前已备份到 ${backup}`);
+    } catch (error) {
+      console.warn('升级前备份失败，继续迁移', error);
+    }
   }
 
   private secureFiles(): void {
@@ -959,6 +984,11 @@ export class MemoryStore {
       this.db.exec(
         'UPDATE activity_log SET ocr_text = NULL, focus_text = NULL WHERE ocr_text IS NOT NULL OR focus_text IS NOT NULL',
       );
+      try {
+        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      } catch (error) {
+        console.warn('升级后 WAL checkpoint 失败', error);
+      }
     }
     if (version < SCHEMA_VERSION) {
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -2736,7 +2766,7 @@ export class MemoryStore {
       }${segment.activity.slice(0, 100)}${segment.corrected ? '（用户纠正）' : ''}`;
     });
     if (segments.length > visible.length) lines.unshift('…（更早的记录已省略）');
-    return lines.join('\n').slice(0, 2400);
+    return redactSensitive(lines.join('\n')).slice(0, 2400);
   }
 
   getRecentCorrectionContext(limit = 5): string {
@@ -2769,7 +2799,14 @@ export class MemoryStore {
 
   clear(): void {
     // 表清单来自 MEMORY_TABLES，避免新增表后“清空记忆”漏删。
-    this.db.exec(CLEARABLE_TABLES.map((table) => `DELETE FROM ${table};`).join(' '));
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec(CLEARABLE_TABLES.map((table) => `DELETE FROM ${table};`).join(' '));
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     for (const folder of ['wiki', 'agent-memory']) {
       try {
         fs.rmSync(path.join(this.userDataDir, folder), { recursive: true, force: true });
@@ -2795,11 +2832,23 @@ export class MemoryStore {
   }
 
   private trimFacts(): void {
-    this.db.exec(`
-      DELETE FROM facts
-      WHERE id NOT IN (
-        SELECT id FROM facts ORDER BY pinned DESC, use_count DESC, updated_at DESC LIMIT ${MAX_FACTS}
+    const count = Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM facts').get() as { count: number }).count,
+    );
+    const overflow = count - MAX_FACTS;
+    if (overflow <= 0) return;
+    // 先删自动/迁移事实，再删工具事实，最后才动用户明确要求“记住”的 explicit。
+    this.db
+      .prepare(
+        `DELETE FROM facts WHERE id IN (
+           SELECT id FROM facts
+           ORDER BY pinned ASC,
+                    CASE source WHEN 'explicit' THEN 2 WHEN 'tool' THEN 1 ELSE 0 END ASC,
+                    use_count ASC,
+                    updated_at ASC
+           LIMIT ?
+         )`,
       )
-    `);
+      .run(overflow);
   }
 }

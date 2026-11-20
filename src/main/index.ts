@@ -42,6 +42,7 @@ let brain: BrainService;
 let tray: Tray | null = null;
 let hitRect: HitRect = { x: 0, y: 0, w: 0, h: 0 };
 let avatarDragging = false;
+let dragResetTimer: NodeJS.Timeout | null = null;
 let hitTimer: NodeJS.Timeout | null = null;
 let scanTimer: NodeJS.Timeout | null = null;
 let dreamTimer: NodeJS.Timeout | null = null;
@@ -585,6 +586,11 @@ function registerIpc(): void {
 
   ipcMain.on('avatar:drag-start', () => {
     avatarDragging = true;
+    if (dragResetTimer) clearTimeout(dragResetTimer);
+    // 渲染进程在拖动中崩溃时，不能把点击穿透永久关掉。
+    dragResetTimer = setTimeout(() => {
+      avatarDragging = false;
+    }, 10_000);
   });
 
   ipcMain.on('avatar:drag-move', (_event, dx: number, dy: number) => {
@@ -610,6 +616,10 @@ function registerIpc(): void {
 
   ipcMain.on('avatar:drag-end', () => {
     avatarDragging = false;
+    if (dragResetTimer) {
+      clearTimeout(dragResetTimer);
+      dragResetTimer = null;
+    }
     const win = getAvatarWindow();
     if (win) {
       const [x, y] = win.getPosition();
@@ -631,7 +641,17 @@ function registerShortcuts(): void {
 
 app.setName('DeskMate');
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (app.isReady()) showPanel();
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return;
   brain = new BrainService();
 
   // 让主进程也能收到状态变化，并广播给两个窗口
@@ -684,6 +704,7 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (hitTimer) clearInterval(hitTimer);
+  if (dragResetTimer) clearTimeout(dragResetTimer);
   if (scanTimer) clearTimeout(scanTimer);
   if (dreamTimer) clearInterval(dreamTimer);
   if (foregroundTimer) clearInterval(foregroundTimer);

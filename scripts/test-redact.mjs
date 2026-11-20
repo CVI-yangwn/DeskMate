@@ -10,6 +10,9 @@ test('脱敏常见密钥、邮箱、手机号、证件与私钥', () => {
     'phone 13800138000',
     'id 11010519491231002X',
     'card 4111 1111 1111 1111',
+    'password=hunter2',
+    'Authorization: Bearer abcdefghijklmnopqrstuvwxyz',
+    'AIzaSyA1234567890abcdefghijklmnopqrstuv',
     '-----BEGIN RSA PRIVATE KEY-----',
     'secret',
     '-----END RSA PRIVATE KEY-----',
@@ -21,6 +24,9 @@ test('脱敏常见密钥、邮箱、手机号、证件与私钥', () => {
   assert.equal(output.includes('13800138000'), false);
   assert.equal(output.includes('11010519491231002X'), false);
   assert.equal(output.includes('4111 1111 1111 1111'), false);
+  assert.equal(output.includes('hunter2'), false);
+  assert.equal(output.includes('abcdefghijklmnopqrstuvwxyz'), false);
+  assert.equal(output.includes('AIzah8DVG'), false);
   assert.equal(output.includes('secret'), false);
   assert.equal(containsSensitive(output), false);
 });

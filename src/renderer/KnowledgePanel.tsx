@@ -203,7 +203,7 @@ export function KnowledgePanel({ lastDreamAt }: { lastDreamAt?: number }) {
   }
 
   async function removePage(id: string, name: string): Promise<void> {
-    if (!window.confirm(`删除「${name}」？Markdown 文件会保留，之后可以手动再建。`)) return;
+    if (!window.confirm(`删除「${name}」？会同时删除数据库记录和对应 Markdown，夜间不会自动重建。`)) return;
     try {
       setView(await window.deskmate.deleteWikiPage(id));
     } catch (cause) {

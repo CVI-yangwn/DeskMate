@@ -9,7 +9,39 @@
 > - 未提交的批次也记，标 `未提交`，合并后再改成 commit 范围；
 > - 每次发版/合并前，把 `未发布` 归到日期下。
 
-当前状态：`v0.1.0` 原型，本地仓库 `main`，最近一次完整验证是 **75 个测试 + typecheck + build 全通过**（2026-11-20）。
+当前状态：`v0.1.0` 原型，本地仓库 `main`，最近一次完整验证是 **78 个测试 + typecheck + build 全通过**（2026-11-20）。
+
+---
+
+## 未发布 · 2026-11-20 — 试用前 P0 修复
+
+> 五个 agent 的发布评审一致给出“有条件值得（3/5）”：内部 dogfood 可以，外部试用不行。下面只修评审里明确的 P0，不扩功能。
+
+### 修复
+
+- **单实例锁**：第二个实例直接退出；`second-instance` 时打开面板，避免两个进程抢同一个 `memory.db`/事件桥端口、双份扫描和双份整理。
+- **渲染进程崩溃恢复**：avatar `render-process-gone` 自动重建窗口并重新定位；panel 崩溃/无响应自动 reload；拖动中崩溃 10 秒后复位 `avatarDragging`，避免点击穿透永久关闭。
+- **清空 vs 夜间整理**：`clearMemory()` 递增 `dreamEpoch`，正在跑的 Dreaming 在下一页/规则/日结/摘要写回前检查 epoch，命中就中止；`clear()` 的 DELETE 包事务。
+- **显式记忆保护**：facts 满 100 时按 pinned → source（auto/migration 先删，tool 次之，explicit 最后）→ use_count → updated_at 淘汰，不再让自动事实挤掉“记住：…”。
+- **脱敏旁路**：`state.evidence` 的 OCR 预览、光标 80 字、报错变化，`labelIntention` 的 focus 300 字，以及活动时间线现在都过 `redactSensitive`；补 `password=`、`Bearer`、`AIza` 模式。
+- **迁移安全**：旧库升级前自动备份 `memory.db.bak-v{version}-{timestamp}`；清 OCR 后 `wal_checkpoint(TRUNCATE)`，降低旧正文留在 WAL 的概率。
+- **演示不污染真实状态**：模拟通过/失败只发气泡/语音，不再改 `state.testResult`/`focusMin`。
+- **UI 诚实**：清空/删页确认文案与实际行为一致；facts 为空时也能“清空全部”；README 修正“首次运行会请求辅助功能”的说法（实际不会自动弹窗）。
+
+### 验证
+
+```bash
+npm run typecheck
+npm test        # 78 pass
+npm run build
+```
+
+### 仍然拦在“外部试用”之外
+
+- 全屏/副屏截图仍会送视觉模型；公司代码/客户资料场景需先关自动扫描或改抓前台窗口。
+- 无 DMG/签名、无 CI、无 Electron UI 自动化；只能源码 dev 模式内部试用。
+- 无 SQLCipher/加密卷；Time Machine/APFS/iCloud 可能在应用外留副本。
+- DeepSeek 解析失败/模型漂移仍缺契约测试；真实 oneapi 需冒烟。
 
 ---
 
