@@ -22,6 +22,8 @@ import { PROACTIVE_KINDS } from './proactiveRules';
 import { redactSensitive } from './redact';
 import type { WikiDraft } from './wiki';
 
+const MAX_OUTPUT_TOKENS = 65_536;
+
 const EMOTIONS = [
   'neutral',
   'smile',
@@ -229,7 +231,7 @@ export class DeepSeekError extends Error {
   }
 }
 
-interface ChatCompletionResponse {
+export interface ChatCompletionResponse {
   choices?: Array<{
     message?: {
       content?: string | null;
@@ -554,7 +556,7 @@ ${this.persona}
     const data = await this.post({
       model: this.env.model,
       thinking: { type: 'disabled' },
-      max_tokens: 500,
+      max_tokens: MAX_OUTPUT_TOKENS,
       temperature: 0.8,
       messages: [
         { role: 'system', content: this.withPersona(CHAT_SYSTEM_PROMPT) },
@@ -572,22 +574,33 @@ ${this.persona}
     memory: string,
     tools: ToolDefinition[],
     executeTool: ToolExecutor,
+    systemExtra = '',
   ): Promise<string> {
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: this.withPersona(CHAT_SYSTEM_PROMPT) },
+      { role: 'system', content: this.withPersona(CHAT_SYSTEM_PROMPT + systemExtra) },
       { role: 'user', content: buildChatUserPrompt(state, history, message, memory) },
     ];
 
-    for (let round = 0; round < 4; round += 1) {
-      const data = await this.post({
-        model: this.env.model,
-        thinking: { type: 'disabled' },
-        max_tokens: 600,
-        temperature: 0.7,
-        messages,
-        tools,
-        tool_choice: 'auto',
-      });
+    // 默认不限制工具轮次；需要时用 DESKMATE_MAX_TURNS 设一个紧急上限。
+    const configured = Number(process.env.DESKMATE_MAX_TURNS ?? 0);
+    const maxRounds =
+      Number.isFinite(configured) && configured > 0
+        ? Math.floor(configured)
+        : Number.POSITIVE_INFINITY;
+
+    for (let round = 0; round < maxRounds; round += 1) {
+      const data = await this.post(
+        {
+          model: this.env.model,
+          thinking: { type: 'disabled' },
+          max_tokens: MAX_OUTPUT_TOKENS,
+          temperature: 0.7,
+          messages,
+          tools,
+          tool_choice: 'auto',
+        },
+        60_000,
+      );
 
       const reply = data.choices?.[0]?.message;
       if (!reply) throw new Error('DeepSeek 返回了空响应');
@@ -631,6 +644,14 @@ ${this.persona}
     }
 
     throw new Error('DeepSeek 工具调用轮次过多');
+  }
+
+  /** 通用补全入口：GUI ReAct 需要自己维护 messages / tools / 图片结果。 */
+  async complete(
+    body: Record<string, unknown>,
+    timeoutMs = 60_000,
+  ): Promise<ChatCompletionResponse> {
+    return this.post(body, timeoutMs);
   }
 
   async extractMemories(

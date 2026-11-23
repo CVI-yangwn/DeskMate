@@ -700,6 +700,7 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;
   brain = new BrainService();
+  brain.startWatchers();
 
   // 让主进程也能收到状态变化，并广播给两个窗口
   brain.subscribe((status) => sendToAll('status:changed', status));

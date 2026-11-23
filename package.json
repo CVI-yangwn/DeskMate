@@ -12,6 +12,13 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test scripts/test-*.mjs",
     "eval:memory": "node --experimental-strip-types --no-warnings scripts/eval-memory.mjs --auto",
+    "eval:gui": "node --experimental-strip-types --no-warnings scripts/gui-eval.mjs",
+    "eval:ax": "node --experimental-strip-types --no-warnings scripts/gui-ax-eval.mjs",
+    "eval:verifier": "node --experimental-strip-types --no-warnings scripts/gui-verifier-eval.mjs",
+    "smoke:gui-api": "node --experimental-strip-types --no-warnings scripts/gui-react-api-smoke.mjs",
+    "smoke:gui": "node --experimental-strip-types --no-warnings scripts/gui-react-smoke.mjs",
+    "smoke:watch": "node --experimental-strip-types --no-warnings scripts/gui-watch-smoke.mjs",
+    "collect:verifier": "node --experimental-strip-types --no-warnings scripts/gui-verifier-collect.mjs",
     "check:model": "node scripts/check-live2d-model.mjs assets/live2d/hijiki/hijiki.model.json",
     "demo:pass": "node scripts/send-test-event.mjs pass",
     "demo:fail": "node scripts/send-test-event.mjs fail"

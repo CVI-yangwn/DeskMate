@@ -16,3 +16,7 @@ dist/
 .chrome-*/
 native/ocr
 native/ax
+evals/gui/
+native/gui
+native/axdump
+.tmp/

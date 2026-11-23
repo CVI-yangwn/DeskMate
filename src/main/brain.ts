@@ -28,7 +28,18 @@ import type {
   UtterancePayload,
   UtterancePlan,
 } from '../shared/types';
-import { AGENT_TOOLS } from './agentTools';
+import {
+  AGENT_TOOLS,
+  GUI_TASK_TOOL,
+  LIST_WATCHERS_TOOL,
+  STOP_WATCHER_TOOL,
+  WATCH_TASK_TOOL,
+} from './agentTools';
+import { createLocalMacEnvironment } from './gui/macEnv';
+import { runGuiReact } from './gui/react';
+import { WatcherService } from './gui/watcherService';
+import { WatcherStore } from './gui/watcherStore';
+import { createWatcherRuntime } from './gui/watcherRuntime';
 import { readFocusedText } from './ax';
 import { EMPTY_GATE, gateActivity } from './salience';
 import { diffLines, emptyDiff, firstErrorLine, typingDelta } from './change';
@@ -1860,7 +1871,13 @@ export class BrainService {
           history,
           message,
           memoryText,
-          AGENT_TOOLS,
+          [
+            ...AGENT_TOOLS,
+            GUI_TASK_TOOL,
+            WATCH_TASK_TOOL,
+            LIST_WATCHERS_TOOL,
+            STOP_WATCHER_TOOL,
+          ],
           async (name, args) => {
             const output = await this.executeTool(name, args);
             if (
@@ -2077,11 +2094,96 @@ export class BrainService {
     return match?.[1] ? this.memory.remember(match[1]) : null;
   }
 
+  private watcherService: WatcherService | null = null;
+
+  /** App 启动时恢复已持久化的 watcher（只在 GUI 开启时）。 */
+  startWatchers(): void {
+    if (!getDeepSeekEnv().guiEnabled) return;
+    try {
+      this.getWatchers();
+    } catch (error) {
+      console.warn('[watcher] 恢复失败:', String(error));
+    }
+  }
+
+  private getWatchers(): WatcherService {
+    if (!this.watcherService) {
+      const env = createLocalMacEnvironment();
+      const runtime = createWatcherRuntime(env, this.client.model, (body) =>
+        this.client.complete(body),
+      );
+      const store = new WatcherStore(path.join(app.getPath('userData'), 'gui-watchers.json'));
+      this.watcherService = new WatcherService({
+        store,
+        check: runtime.check,
+        act: runtime.act,
+      });
+      this.watcherService.start();
+    }
+    return this.watcherService;
+  }
+
   private async executeTool(
     name: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
     switch (name) {
+      case 'watch_task': {
+        if (!getDeepSeekEnv().guiEnabled) {
+          return { ok: false, error: 'GUI 已被关闭（DESKMATE_GUI=0）' };
+        }
+        const condition = typeof args.condition === 'string' ? args.condition.trim().slice(0, 300) : '';
+        const task = typeof args.task === 'string' ? args.task.trim().slice(0, 500) : '';
+        if (!condition || !task) return { ok: false, error: 'condition / task 不能为空' };
+        const intervalSec = Math.min(86_400, Math.max(10, Number(args.intervalSec) || 60));
+        const record = this.getWatchers().add({
+          condition,
+          task,
+          intervalMs: intervalSec * 1000,
+          shadow: args.shadow !== false,
+          once: args.once !== false,
+        });
+        return {
+          ok: true,
+          watcher: record,
+          mode: record.shadow ? 'shadow（只记录，不动作）' : 'armed（命中后会操作）',
+        };
+      }
+      case 'list_watchers': {
+        if (!getDeepSeekEnv().guiEnabled) {
+          return { ok: false, error: 'GUI 已被关闭（DESKMATE_GUI=0）' };
+        }
+        return { watchers: this.getWatchers().list() };
+      }
+      case 'stop_watcher': {
+        if (!getDeepSeekEnv().guiEnabled) {
+          return { ok: false, error: 'GUI 已被关闭（DESKMATE_GUI=0）' };
+        }
+        const id = typeof args.id === 'string' ? args.id : '';
+        return { ok: Boolean(id) && this.getWatchers().remove(id), id };
+      }
+      case 'gui_task': {
+        if (!getDeepSeekEnv().guiEnabled) {
+          return { ok: false, error: 'GUI 已被关闭（DESKMATE_GUI=0）' };
+        }
+        const task = typeof args.task === 'string' ? args.task.trim().slice(0, 500) : '';
+        if (!task) return { ok: false, error: 'task 为空' };
+        const requestedSteps = Number(args.maxSteps);
+        const maxSteps =
+          Number.isFinite(requestedSteps) && requestedSteps > 0 ? requestedSteps : undefined;
+        const result = await runGuiReact(task, {
+          env: createLocalMacEnvironment(),
+          model: this.client.model,
+          complete: (body) => this.client.complete(body),
+          maxSteps,
+        });
+        return {
+          ok: result.status === 'done',
+          status: result.status,
+          summary: result.final,
+          steps: result.steps,
+        };
+      }
       case 'remember': {
         if (!this.memory.getSettings().autoMemory && !this.lastUserAskedToRemember) {
           return { ok: false, error: '自动记忆已关闭，只有用户明确要求时才能保存' };

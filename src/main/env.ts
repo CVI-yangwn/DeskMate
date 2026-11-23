@@ -1,13 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
+import { parseGuiEnabled } from './gui/config.ts';
 
 export interface DeepSeekEnv {
   apiKey: string;
   baseUrl: string;
   model: string;
   visionModel: string;
+  /** GUI 控制默认开启；显式 0/false/off/no 才关闭。 */
+  guiEnabled: boolean;
 }
+
+
 
 let cached: DeepSeekEnv | null = null;
 
@@ -75,12 +80,16 @@ export function getDeepSeekEnv(): DeepSeekEnv {
     process.env.DEEPSEEK_VISION_MODEL?.trim() ||
     fileEnv.DEEPSEEK_VISION_MODEL?.trim() ||
     'DeepSeek-V4-Flash-Vision-Exp';
+  const guiEnabled = parseGuiEnabled(
+    process.env.DESKMATE_GUI ?? fileEnv.DESKMATE_GUI ?? '',
+  );
 
   cached = {
     apiKey,
     baseUrl: baseUrl.replace(/\/+$/, ''),
     model,
     visionModel,
+    guiEnabled,
   };
   return cached;
 }

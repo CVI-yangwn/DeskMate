@@ -51,6 +51,20 @@ if [ -f native/ax.swift ]; then
   fi
 fi
 
+if [ -f native/gui.swift ]; then
+  if [ ! -x native/gui ] || [ native/gui.swift -nt native/gui ]; then
+    echo "building native GUI helper..."
+    xcrun swiftc -O native/gui.swift -o native/gui
+  fi
+fi
+
+if [ -f native/axdump.swift ]; then
+  if [ ! -x native/axdump ] || [ native/axdump.swift -nt native/axdump ]; then
+    echo "building native AX dump helper..."
+    xcrun swiftc -O native/axdump.swift -o native/axdump
+  fi
+fi
+
 if [ ! -f .env.local ]; then
   cp .env.example .env.local
   echo "created .env.local from .env.example"
