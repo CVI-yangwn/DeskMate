@@ -30,7 +30,7 @@ export function createAvatarWindow(): BrowserWindow {
 
   const win = new BrowserWindow({
     width: 240,
-    height: 360,
+    height: 300,
     show: false,
     transparent: true,
     frame: false,
@@ -98,7 +98,7 @@ export function createPanelWindow(): BrowserWindow {
     minHeight: 520,
     show: false,
     title: '同桌 DeskMate',
-    backgroundColor: '#15131f',
+    backgroundColor: '#efe5d2',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: preloadPath(),

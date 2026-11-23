@@ -713,7 +713,6 @@ export default function PanelApp() {
   const activity = locked
     ? '你离开了一会儿。解锁后我会继续看着。'
     : meaningful(state?.activity) || '还没有扫描。点一下“扫描屏幕”，我看看你在做什么。';
-  const appInitial = locked ? '锁' : (rawApp || '同').trim().slice(0, 1).toUpperCase();
   const noForeground = !rawApp || rawApp === 'Desktop';
   const perceptionPaused = (status?.perceptionPausedUntil ?? 0) > Date.now();
   const analyzedAt = state?.lastAnalyzedAt ?? state?.lastScanAt;
@@ -778,6 +777,8 @@ export default function PanelApp() {
   const scanStats = status?.scanStats ?? { total: 0, analyzed: 0 };
   const openCommitmentCount =
     companion?.commitments.filter((item) => item.status === 'open').length ?? 0;
+  const todayEmpty =
+    !(companion?.anchors.length ?? 0) && !(companion?.commitments.length ?? 0);
   const memoryFilters = [
     { key: 'all' as const, label: '全部', count: filterCounts.all },
     { key: 'project' as const, label: '项目', count: filterCounts.project },
@@ -792,10 +793,8 @@ export default function PanelApp() {
         <div className="brand-lockup">
           <div className="brand-mark">同</div>
           <div className="brand-copy">
-            <div className="brand">
-              同桌 <span>DESKMATE</span>
-            </div>
-            <div className="subtitle">你的桌面工作搭子</div>
+            <div className="brand">同桌</div>
+            <div className="subtitle">台灯下的工作搭子</div>
           </div>
         </div>
         <div className="header-actions">
@@ -859,214 +858,191 @@ export default function PanelApp() {
 
       <main className={`panel-main panel-tab-${activeTab}`}>
         {activeTab === 'now' && (
-          <>
-        <section className="card now-card">
-          <div className="now-head">
-            <span className="eyebrow">此刻</span>
-            <div className="context-badges">
-              {source && <span className="source-tag">{sourceLabel(source)}</span>}
+          <section className="now-page">
+            <div className="now-kicker">
+              <span className="kicker-time">
+                {state?.lastScanAt ? formatClock(state.lastScanAt) : '—'}
+              </span>
               <span
-                className={`live-pill ${dndOn || locked || perceptionPaused || stateStale ? 'paused' : 'live'}`}
+                className={`presence-word ${dndOn || locked || perceptionPaused || stateStale ? 'quiet' : 'live'}`}
               >
+                <i className="presence-dot" />
                 {liveLabel}
               </span>
+              {source && <span className="source-tag">{sourceLabel(source)}</span>}
             </div>
-          </div>
 
-          <div className="now-app">
-            <div className={`app-badge ${locked ? 'locked' : ''}`}>{appInitial}</div>
-            <div className="app-copy">
-              <div className="context-app">{appName}</div>
-              <div className="context-window">{windowTitle}</div>
-            </div>
-          </div>
+            <h1 className={`context-app ${locked ? 'locked' : ''}`}>{appName}</h1>
+            <p className="context-window">{windowTitle}</p>
 
-          <p className="activity">{activity}</p>
+            <p className="activity">{activity}</p>
 
-          {intentions?.current ? (
-            <div className="intent-line" title={intentions.current.app}>
-              <span className="intent-tag">意图</span>
-              <span className="intent-line-text">{intentions.current.text}</span>
-              <span className="intent-line-meta">
-                {intentions.current.stepCount} 步
-                {intentions.todayCount > 0 ? ` · 今天 ${intentions.todayCount} 段` : ''}
-              </span>
-            </div>
-          ) : null}
-
-          {intentions?.prediction?.decision === 'push' ? (
-            <div className="intent-guess">
-              <span className="intent-guess-label">我猜</span>
-              <span className="intent-guess-text" title={intentions.prediction.text}>
-                {intentions.prediction.text}
-              </span>
-              <span className="intent-guess-conf">
-                {Math.round((intentions.prediction.confidence || 0) * 100)}%
-              </span>
-              {intentions.prediction.outcome ? (
-                <span className="intent-guess-outcome">
-                  {intentions.prediction.outcome === 'accepted' ? '已确认' : '已作废'}
+            {intentions?.current ? (
+              <div className="intent-line" title={intentions.current.app}>
+                <span className="intent-tag">意图</span>
+                <span className="intent-line-text">{intentions.current.text}</span>
+                <span className="intent-line-meta">
+                  {intentions.current.stepCount} 步
+                  {intentions.todayCount > 0 ? ` · 今天 ${intentions.todayCount} 段` : ''}
                 </span>
-              ) : (
-                <div className="intent-guess-actions">
-                  <button
-                    className="intent-choice"
-                    disabled={intentBusy}
-                    onClick={() => void answerPrediction(intentions.prediction!.id, 'accepted')}
+              </div>
+            ) : null}
+
+            {intentions?.prediction?.decision === 'push' ? (
+              <div className="intent-guess">
+                <span className="intent-guess-label">
+                  下一步
+                  <em>{Math.round((intentions.prediction.confidence || 0) * 100)}%</em>
+                </span>
+                <span className="intent-guess-text" title={intentions.prediction.text}>
+                  {intentions.prediction.text}
+                </span>
+                {intentions.prediction.outcome ? (
+                  <span className="intent-guess-outcome">
+                    {intentions.prediction.outcome === 'accepted' ? '已确认' : '已作废'}
+                  </span>
+                ) : (
+                  <div className="intent-guess-actions">
+                    <button
+                      className="intent-choice"
+                      disabled={intentBusy}
+                      onClick={() => void answerPrediction(intentions.prediction!.id, 'accepted')}
+                    >
+                      对
+                    </button>
+                    <button
+                      className="intent-choice ghost"
+                      disabled={intentBusy}
+                      onClick={() => void answerPrediction(intentions.prediction!.id, 'rejected')}
+                    >
+                      不是
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            <div className="telemetry">
+              <span className={testClass}>测试 {testLabel}</span>
+              <span>专注 {state?.focusMin ?? 0} 分</span>
+              <span>扫描 {formatClock(state?.lastScanAt)}</span>
+              {confidence > 0 && <span>置信 {Math.round(confidence * 100)}%</span>}
+              <span>{screenLabel}</span>
+            </div>
+
+            <div className="action-row">
+              <button className="action-scan" disabled={busy} onClick={() => void scanScreen()}>
+                <span>{busy ? '正在看…' : '看一眼屏幕'}</span>
+                <span className="action-arrow">→</span>
+              </button>
+              <div className="demo-row">
+                <span className="demo-label">演示</span>
+                <button
+                  className="demo-link"
+                  disabled={busy}
+                  onClick={() => void runDemo('pass')}
+                >
+                  通过
+                </button>
+                <button
+                  className="demo-link"
+                  disabled={busy}
+                  onClick={() => void runDemo('fail')}
+                >
+                  失败
+                </button>
+              </div>
+            </div>
+
+            <details className="diagnostics" title={state?.evidence?.join('\n') || undefined}>
+              <summary>细节与连接</summary>
+              <div className="diagnostics-grid">
+                {captureLabel && (
+                  <span
+                    className="capture-chip"
+                    title={state?.displayNames?.join(' / ') || undefined}
                   >
-                    对
-                  </button>
-                  <button
-                    className="intent-choice ghost"
-                    disabled={intentBusy}
-                    onClick={() => void answerPrediction(intentions.prediction!.id, 'rejected')}
-                  >
-                    不是
-                  </button>
-                </div>
-              )}
+                    {captureLabel}
+                  </span>
+                )}
+                {noForeground && <span className="stale-text">未读前台应用</span>}
+                <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
+                <span>{scanDuration > 0 ? `${Math.round(scanDuration / 100) / 10}s` : '—'}</span>
+                {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
+                <span>
+                  扫描 {scanStats.total} 次 · 分析 {scanStats.analyzed} 次
+                </span>
+                <span>视觉 {status?.visionCallsThisHour ?? 0} 次/小时</span>
+                {stateStale && <span className="stale-text">状态可能过期</span>}
+              </div>
+              <div className="context-api" title={status?.apiMessage}>
+                <i className={`api-dot ${apiDot}`} />
+                <span>{status?.apiMessage ?? '读取中…'}</span>
+                <button
+                  className="text-button"
+                  disabled={busy}
+                  onClick={() => void testConnection()}
+                >
+                  测试连接
+                </button>
+              </div>
+            </details>
+
+            <div className="utility-row">
+              <button className={`toggle ${dndOn ? 'on' : ''}`} onClick={() => void toggleDnd()}>
+                <span className="toggle-dot" />
+                勿扰 <b>{dndOn ? '开' : '关'}</b>
+              </button>
+              <button className="toggle" onClick={() => void openMemory()}>
+                <span className="toggle-dot" />
+                记忆 <b>{status?.memoryCount ?? 0}</b>
+              </button>
+              <button
+                className={`toggle ${voiceOn ? 'on' : ''}`}
+                onClick={() => void toggleVoice()}
+              >
+                <span className="toggle-dot" />
+                语音 <b>{voiceOn ? '开' : '关'}</b>
+              </button>
+              <button
+                className={`toggle ${perceptionPaused ? 'on' : ''}`}
+                onClick={() => void togglePerceptionPause()}
+                title={perceptionPaused ? '恢复自动感知' : '暂停自动感知 15 分钟'}
+              >
+                <span className="toggle-dot" />
+                {perceptionPaused ? '恢复感知' : '暂停 15 分'}
+              </button>
             </div>
-          ) : null}
 
-          <div className="metrics">
-            <div className="metric">
-              <span>测试</span>
-              <strong className={testClass}>{testLabel}</strong>
+            <div className="ask-block">
+              <div className="ask-head">
+                <span className="eyebrow">可以问我</span>
+                <span className="ask-sub">点一下带到对话</span>
+              </div>
+              <div className="ask-list">
+                <button onClick={() => askFromNow('我刚才一段时间在干嘛？')}>
+                  我刚才一段时间在干嘛？
+                  <span>→</span>
+                </button>
+                <button onClick={() => askFromNow('总结一下我今天做了什么')}>
+                  总结一下今天做了什么
+                  <span>→</span>
+                </button>
+                <button onClick={() => askFromNow('我接下来该做什么？')}>
+                  我接下来该做什么？
+                  <span>→</span>
+                </button>
+              </div>
             </div>
-            <div className="metric">
-              <span>专注</span>
-              <strong className="metric-value">
-                {state?.focusMin ?? 0}
-                <em> min</em>
-              </strong>
-            </div>
-            <div className="metric">
-              <span>最近扫描</span>
-              <strong className="metric-value">{formatClock(state?.lastScanAt)}</strong>
-            </div>
-          </div>
-
-          <details className="diagnostics" title={state?.evidence?.join('\n') || undefined}>
-            <summary>细节</summary>
-            <div className="diagnostics-grid">
-              {captureLabel && (
-              <span className="capture-chip" title={state?.displayNames?.join(' / ') || undefined}>
-                {captureLabel}
-              </span>
-            )}
-              {noForeground && <span className="stale-text">未读前台应用</span>}
-              <span>{state?.ocrLines ? `OCR ${state.ocrLines} 行` : '视觉分析'}</span>
-              <span>{confidence ? `置信度 ${Math.round(confidence * 100)}%` : '置信度 —'}</span>
-              {scanDuration > 0 && <span>{Math.round(scanDuration / 100) / 10}s</span>}
-              {evidenceCount > 0 && <span>{evidenceCount} 条证据</span>}
-              <span>
-                扫描 {scanStats.total} 次 · 分析 {scanStats.analyzed} 次
-              </span>
-              <span>视觉 {status?.visionCallsThisHour ?? 0} 次/小时</span>
-              {stateStale && <span className="stale-text">状态可能过期</span>}
-            </div>
-          </details>
-
-          <div className="context-foot">
-            <span className="context-api" title={status?.apiMessage}>
-              <i className={`api-dot ${apiDot}`} />
-              {status?.apiMessage ?? '读取中…'}
-            </span>
-            <span>{screenLabel}</span>
-          </div>
-        </section>
-
-        <section className="card action-card">
-          <div className="action-grid">
-            <button className="action action-scan" disabled={busy} onClick={() => void scanScreen()}>
-              <span className="action-icon">⌕</span>
-              <span className="action-copy">
-                <strong>扫描屏幕</strong>
-                <small>抓取聚焦显示器整屏</small>
-              </span>
-              <span className="action-arrow">→</span>
-            </button>
-            <button className="action action-demo pass" disabled={busy} onClick={() => void runDemo('pass')}>
-              <span className="action-icon">✓</span>
-              <span className="action-copy">
-                <strong>模拟通过</strong>
-                <small>红 → 绿</small>
-              </span>
-            </button>
-            <button className="action action-demo fail" disabled={busy} onClick={() => void runDemo('fail')}>
-              <span className="action-icon">!</span>
-              <span className="action-copy">
-                <strong>模拟失败</strong>
-                <small>测试提醒</small>
-              </span>
-            </button>
-          </div>
-
-          <div className="utility-row">
-            <button className={`toggle ${dndOn ? 'on' : ''}`} onClick={() => void toggleDnd()}>
-              <span className="toggle-dot" />
-              勿扰 <b>{dndOn ? '开' : '关'}</b>
-            </button>
-            <button className="toggle" onClick={() => void openMemory()}>
-              <span className="toggle-dot" />
-              记忆 <b>{status?.memoryCount ?? 0}</b>
-            </button>
-            <button
-              className="toggle"
-              onClick={() => setActiveTab('today')}
-              title={`今天 ${companion?.anchors.length ?? 0} 个锚点 · ${openCommitmentCount} 件答应的事`}
-            >
-              <span className="toggle-dot" />
-              今天 <b>{companion?.anchors.length ?? 0}</b>
-            </button>
-            <button className={`toggle ${voiceOn ? 'on' : ''}`} onClick={() => void toggleVoice()}>
-              <span className="toggle-dot" />
-              语音 <b>{voiceOn ? '开' : '关'}</b>
-            </button>
-            <button
-              className={`toggle ${perceptionPaused ? 'on' : ''}`}
-              onClick={() => void togglePerceptionPause()}
-              title={perceptionPaused ? '恢复自动感知' : '暂停自动感知 15 分钟'}
-            >
-              <span className="toggle-dot" />
-              {perceptionPaused ? '恢复感知' : '暂停 15m'}
-            </button>
-            <button className="text-button" disabled={busy} onClick={() => void testConnection()}>
-              测试连接
-            </button>
-          </div>
-        </section>
-
-        <section className="card ask-card">
-          <div className="ask-head">
-            <span className="eyebrow">可以问我</span>
-            <span className="ask-sub">点一下带到对话</span>
-          </div>
-          <div className="ask-list">
-            <button onClick={() => askFromNow('我刚才一段时间在干嘛？')}>
-              我刚才一段时间在干嘛？
-              <span>→</span>
-            </button>
-            <button onClick={() => askFromNow('总结一下我今天做了什么')}>
-              总结一下今天做了什么
-              <span>→</span>
-            </button>
-            <button onClick={() => askFromNow('我接下来该做什么？')}>
-              我接下来该做什么？
-              <span>→</span>
-            </button>
-          </div>
-        </section>
-
-          </>
+          </section>
         )}
 
         {activeTab === 'chat' && (
-        <section className="card chat-card">
+        <section className="chat-page">
           <div className="chat-head">
             <div className="chat-title-block">
-              <div className="card-title">和同桌说两句</div>
-              <div className="chat-sub">{voiceOn ? '语音自动朗读已开启' : '语音已静音'}</div>
+              <h1 className="page-title">对话</h1>
+              <div className="chat-sub">{voiceOn ? '语音已开' : '语音已关'}</div>
             </div>
             {source && <span className="source-tag">{sourceLabel(source)}</span>}
           </div>
@@ -1080,7 +1056,11 @@ export default function PanelApp() {
                 key={`${message.at}-${index}`}
                 className={`message ${message.role === 'user' ? 'user' : 'assistant'}`}
               >
-                <div className="message-role">{message.role === 'user' ? '你' : '同桌'}</div>
+                {index === 0 || messages[index - 1]?.role !== message.role ? (
+                  <div className="message-role">
+                    {message.role === 'user' ? '你' : '同桌'} · {formatClock(message.at)}
+                  </div>
+                ) : null}
                 <div className="message-text">{message.text}</div>
               </div>
             ))}
@@ -1139,7 +1119,7 @@ export default function PanelApp() {
           <section className="card today-page">
             <div className="today-page-head">
               <div>
-                <span className="eyebrow">今天</span>
+                <h1 className="page-title">今天</h1>
                 <p>只记值得记的瞬间，不做流水账。</p>
               </div>
               <button className="text-button" onClick={() => void openCompanion()}>
@@ -1147,6 +1127,19 @@ export default function PanelApp() {
               </button>
             </div>
 
+            {todayEmpty ? (
+              <div className="today-empty">
+                <p className="today-empty-title">今天还没有锚点，也没有答应的事。</p>
+                <p className="today-empty-body">
+                  值得记的不是“做了什么”，而是卡住的地方、想通的瞬间、答应过谁。
+                </p>
+                <button className="action-scan" onClick={() => void openCompanion()}>
+                  <span>记下第一件</span>
+                  <span className="action-arrow">→</span>
+                </button>
+              </div>
+            ) : (
+              <>
             <div className="today-section">
               <div className="today-section-head">
                 <span>今天的锚点</span>
@@ -1193,6 +1186,9 @@ export default function PanelApp() {
               </div>
             </div>
 
+              </>
+            )}
+
             <div className="today-note">
               <span className="eyebrow">今天的一句话</span>
               <p>
@@ -1210,14 +1206,6 @@ export default function PanelApp() {
           </section>
         )}
       </main>
-
-      <footer className="panel-footer">
-        <span className="footer-brand">
-          <i className="footer-dot" />
-          Haru · Live2D
-        </span>
-        <span>{voiceOn ? '语音开启' : '语音静音'} · macOS</span>
-      </footer>
 
       {settingsOpen && (
         <div className="sheet-backdrop" onClick={() => setSettingsOpen(false)}>

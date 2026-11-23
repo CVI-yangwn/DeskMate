@@ -12,6 +12,7 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  AvatarHitMask,
   ChatMessage,
   DemoState,
   DreamRun,
@@ -41,6 +42,8 @@ import {
 let brain: BrainService;
 let tray: Tray | null = null;
 let hitRect: HitRect = { x: 0, y: 0, w: 0, h: 0 };
+let hitMask: AvatarHitMask | null = null;
+let bubbleRect: HitRect | null = null;
 let avatarDragging = false;
 let dragResetTimer: NodeJS.Timeout | null = null;
 let hitTimer: NodeJS.Timeout | null = null;
@@ -72,12 +75,37 @@ function startHitTestLoop(): void {
     }
 
     const point = screen.getCursorScreenPoint();
-    const bounds = win.getBounds();
-    const inside =
-      point.x >= bounds.x + hitRect.x &&
-      point.x <= bounds.x + hitRect.x + hitRect.w &&
-      point.y >= bounds.y + hitRect.y &&
-      point.y <= bounds.y + hitRect.y + hitRect.h;
+    const bounds = win.getContentBounds();
+    const localX = point.x - bounds.x;
+    const localY = point.y - bounds.y;
+
+    let inside = false;
+
+    // 气泡是 DOM，单独给一个矩形；猫本体用像素掩码走轮廓。
+    if (bubbleRect) {
+      inside =
+        localX >= bubbleRect.x &&
+        localX <= bubbleRect.x + bubbleRect.w &&
+        localY >= bubbleRect.y &&
+        localY <= bubbleRect.y + bubbleRect.h;
+    }
+
+    if (!inside && hitMask) {
+      const col = Math.floor(localX / hitMask.cell);
+      const row = Math.floor(localY / hitMask.cell);
+      inside =
+        col >= 0 &&
+        row >= 0 &&
+        col < hitMask.cols &&
+        row < hitMask.rows &&
+        hitMask.mask[row * hitMask.cols + col] === 1;
+    } else if (!inside && !hitMask) {
+      inside =
+        localX >= hitRect.x &&
+        localX <= hitRect.x + hitRect.w &&
+        localY >= hitRect.y &&
+        localY <= hitRect.y + hitRect.h;
+    }
 
     win.setIgnoreMouseEvents(!inside, { forward: true });
   }, 50);
@@ -116,7 +144,7 @@ function createTray(): void {
     const menu = Menu.buildFromTemplate([
       { label: '打开面板', click: () => showPanel() },
       { label: '记一下…', click: openCompanionCapture },
-      { label: '把 Haru 叫到当前屏幕', click: moveToCursorDisplay },
+      { label: '把小黑叫到当前屏幕', click: moveToCursorDisplay },
       { type: 'separator' },
       {
         label: '模拟测试通过',
@@ -584,6 +612,25 @@ function registerIpc(): void {
     };
   });
 
+  ipcMain.on('avatar:hit-mask', (_event, mask: AvatarHitMask) => {
+    if (
+      !mask ||
+      !Array.isArray(mask.mask) ||
+      !Number.isFinite(mask.cols) ||
+      !Number.isFinite(mask.rows) ||
+      !Number.isFinite(mask.cell) ||
+      mask.cols <= 0 ||
+      mask.rows <= 0
+    ) {
+      return;
+    }
+    hitMask = mask;
+  });
+
+  ipcMain.on('avatar:bubble-rect', (_event, rect: HitRect | null) => {
+    bubbleRect = rect && rect.w > 0 && rect.h > 0 ? rect : null;
+  });
+
   ipcMain.on('avatar:drag-start', () => {
     avatarDragging = true;
     if (dragResetTimer) clearTimeout(dragResetTimer);
@@ -690,7 +737,7 @@ app.whenReady().then(async () => {
   screen.on('display-added', () => positionAvatarWindow());
   screen.on('display-removed', () => positionAvatarWindow());
 
-  // 默认收起面板，避免启动时突然弹窗；用户可通过 Haru、托盘或快捷键打开。
+  // 默认收起面板，避免启动时突然弹窗；用户可通过小黑、托盘或快捷键打开。
 });
 
 app.on('activate', () => {

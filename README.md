@@ -2,7 +2,7 @@
 
 > 一个坐在 macOS 屏幕边上的独立 AI 工作搭子：自己看屏幕、自己判断、自己说话。**不依赖 VS Code，不依赖任何 IDE 插件。**
 
-当前状态：**独立 macOS 原型已经搭好**。Electron 透明窗 + Haru Live2D + 屏幕/前台窗口感知 + 本地 Vision OCR + DeepSeek 视觉 + SQLite 长期记忆 + 个人 wiki / 夜间整理 / 提醒规则学习 + 技能 + 工具调用 + 隐私/勿扰 + 面板 UI。内网 oneapi 已实测通过。
+当前状态：**独立 macOS 原型已经搭好**。Electron 透明窗 + 小黑 Live2D + 屏幕/前台窗口感知 + 本地 Vision OCR + DeepSeek 视觉 + SQLite 长期记忆 + 个人 wiki / 夜间整理 / 提醒规则学习 + 技能 + 工具调用 + 隐私/勿扰 + 面板 UI。内网 oneapi 已实测通过。
 还没接 macOS Speech 语音输入、`say` WAV 口型驱动和 DMG 打包。
 
 ## 架构
@@ -17,7 +17,7 @@ macOS 本机
 │  ├─ 大脑：DeepSeek 文本 + 视觉 + JSON + tool calls
 │  ├─ 事件桥：127.0.0.1:39876
 │  └─ 主动策略：每次扫描请 LLM 判断 / 勿扰
-├─ Live2D 透明窗：Haru
+├─ Live2D 透明窗：小黑（hijiki 黑猫）
 ├─ 面板：状态 / 扫描 / 记忆 / 设置 / 聊天
 └─ 语音：macOS say（Tingting）
 ```
@@ -31,7 +31,7 @@ macOS 本机
 |---|---|
 | 平台 | macOS |
 | 桌面壳 | Electron + React + TypeScript |
-| 形象 | Live2D，默认 **Haru**（Cubism 3/4） |
+| 形象 | Live2D，默认 **小黑**（Cubism 2 黑猫，hijiki） |
 | 大脑 / 眼睛 | 百度内网 oneapi（OpenAI-compatible）：`DeepSeek-V4.1-Flash` 文本 + `DeepSeek-V4-Flash-Vision-Exp` 视觉 |
 | 感知 | 前台窗口 + 所有显示器整屏 + 本地 OCR + 空闲时间；**无 VS Code 依赖** |
 | 嘴巴 | macOS `say` |
@@ -73,7 +73,7 @@ npm run dev
 
 > `.env.local` 已被 `.gitignore` 忽略。不要把 key 提交到仓库。
 > 没有有效 key 时，应用会自动使用本地 mock，不会崩。
-> 打包后，`.env.local` 和 `config/avatar.haru.json` 也可以放在 `~/Library/Application Support/DeskMate/`。
+> 打包后，`.env.local` 和 `config/avatar.json` 也可以放在 `~/Library/Application Support/DeskMate/`。
 
 ### 构建与检查
 
@@ -96,10 +96,10 @@ npm run eval:memory   # 零模型 wiki 检索体检；默认复制 DB，不碰�
 
 ## 现在能做什么
 
-![面板预览（模拟数据）](assets/panel-preview.png)
+![面板预览（暖纸浅色主题）](assets/panel-preview.png)
 
-- 透明、置顶、可拖动、点击穿透的 Haru 桌面形象；
-- 面板窗口（默认 480×840）：四个标签页「此刻 / 对话 / 今天 / 知识」；此刻页放应用/窗口/活动、意图预测、测试状态和扫描控制，对话页专注聊天，今天页放锚点和答应过的事，知识页放日结、wiki、规则和技能；
+- 透明、置顶、可拖动、点击穿透的小黑桌面形象（一只坐在桌角的小黑猫，会眨眼、动尾巴、说话时张嘴）；没有“在线”角标，点击区域按猫的 alpha 轮廓判定，透明区域直接穿透；
+- 面板窗口（默认 480×840）：四个标签页「此刻 / 对话 / 今天 / 知识」；暖纸浅色主题，靠字号、留白和细线分层；此刻页放应用/窗口/活动、意图预测、测试状态和扫描控制，对话页专注聊天，今天页放锚点和答应过的事，知识页放日结、wiki、规则和技能；
 - **长期记忆**：SQLite + FTS5，保存在 `~/Library/Application Support/DeskMate/memory.db`；支持分类（项目/偏好/事实）、置顶、搜索、编辑、单条删除、手动添加；按问题检索相关记忆，并记录来源/置信度/使用次数；
 - **个人 wiki**：一页一个实体（项目 / 人物 / 话题），带当前摘要、未完成条目、证据来源和 Change Log；页面同时写成 `userData/wiki/<type>/<slug>.md`，可直接看、删、进 git；模型只能“只写变化”，没提到的条目不会被重写冲掉，引用必须来自当天证据；
 - **夜间整理**：默认每天 23:30 后把当天对话、锚点、承诺、意图、屏幕活动、主动消息反馈收敛成 wiki 页面、提醒规则、日结和一份“关于你”的摘要；最多 5 页，没 key 时做本地日结与项目页迁移；面板“知识”页可以“现在整理”；
@@ -126,11 +126,11 @@ npm run eval:memory   # 零模型 wiki 检索体检；默认复制 DB，不碰�
 - **扫描当前屏幕**：抓所有显示器的整屏（聚焦屏优先）→ 每块屏跑 macOS Vision 本地 OCR → 把多张图一起发给 `DeepSeek-V4-Flash-Vision-Exp` → 汇总更新活动/测试状态；任意屏出现隐私排除应用时自动退回到前台窗口截图；
 - **可信感知**：每次扫描都调用视觉模型；本地 OCR 作为证据和测试结果兜底，不再用它跳过 LLM；面板显示 OCR 行数、置信度、耗时、证据数和扫描/分析次数；
 - **自适应扫描**：默认 60 秒，窗口变化 12 秒内触发；空闲时降频；不再因为画面没变化而跳过视觉分析；可暂停感知 15 分钟；可通过 `DESKMATE_SCAN_INTERVAL_MS` / `DESKMATE_AUTO_SCAN=0` 调整；
-- **隐私**：可配置隐私排除应用（前台命中时不截图、不分析；多屏整屏模式发现任意屏可见的隐私应用时退回前台窗口）；视觉调用不再受预算限制；启动默认只显示 Haru，不自动弹出面板；
+- **隐私**：可配置隐私排除应用（前台命中时不截图、不分析；多屏整屏模式发现任意屏可见的隐私应用时退回前台窗口）；视觉调用不再受预算限制；启动默认只显示小黑，不自动弹出面板；
 - **检测测试红→绿**：上一次截图是 fail、这次是 pass，就生成一句祝贺；
 - DeepSeek 可用时走真实模型，key 缺失/无效时自动回退 mock；
 - 托盘菜单、全局快捷键 `Cmd+Shift+Space` 打开/收起面板，`Cmd+Shift+M` 打开“今天”并直接记一下；
-- 点击 Haru 或气泡打开面板；拖动 Haru 移动位置，位置跨重启保存；
+- 点击小黑或气泡打开面板；拖动小黑移动位置，位置跨重启保存；
 - 聊天回复自动通过 `say` 朗读，并同步气泡/口型；新的语音会打断上一条；
 - 本地事件桥 `POST http://127.0.0.1:39876/event`，可以用 `npm run demo:pass` / `npm run demo:fail` 手动触发；只接受 JSON Content-Type，并拒绝非本机 Origin。
 
@@ -149,12 +149,13 @@ npm run eval:memory   # 零模型 wiki 检索体检；默认复制 DB，不碰�
 ```text
 assets/live2d/
 ├─ README.md                 # 模型选择与备选
-├─ haru/                     # 默认 Live2D 模型（含 preview / README / 许可）
+├─ hijiki/                   # 默认 Live2D 模型：小黑（Cubism 2，含 README / 许可）
+├─ haru/                     # 备选 Live2D 模型（Cubism 3/4）
 ├─ LICENSE-Live2D-CubismWebSamples.md
 └─ NOTICE-Live2D.md
 
 config/
-└─ avatar.haru.json          # Haru 的表情/动作/口型映射
+└─ avatar.json               # 头像模型 / 缩放 / 动作 / 口型映射
 
 native/
 ├─ ocr.swift                 # macOS Vision OCR 源码
@@ -248,7 +249,7 @@ git status
 - **wiki 文件按名字落盘**：删除页面会 unlink 当前 Markdown；改名后旧名字的 Markdown 仍会留在 `userData/wiki/`。tombstone 只存哈希，夜间不会把同名页自动建回来。
 - **点击穿透依赖 hit rect**：如果 macOS 上点击不灵，需要把 `focusable` 在 hover 时临时设为 true（待真机验证）。
 - **`node:sqlite` 仍带 experimental 警告**：Electron 45 / Node 24 下已实测可用；Node 22 启动时可能打印 SQLite experimental warning，不影响使用。
-- **打包还没闭环**：仍缺 electron-builder/DMG 流程；代码已支持从 userData 读取 `.env.local` 和 `config/avatar.haru.json`，`native/ocr` 需要随应用放进 resources。
+- **打包还没闭环**：仍缺 electron-builder/DMG 流程；代码已支持从 userData 读取 `.env.local` 和 `config/avatar.json`，`native/ocr` 需要随应用放进 resources。
 - **事件桥没有 token**：已经限制为本机 Origin + JSON Content-Type，但同机进程仍可调用；后续可以加一次性 token。
 - **静态加密还没做**：DB 文件 600、`secure_delete`/`VACUUM` 已开，但没有 SQLCipher/加密卷；Time Machine、APFS 快照和 iCloud 同步仍可能在应用外保留副本。
 

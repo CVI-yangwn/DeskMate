@@ -9,6 +9,7 @@ import type {
   DeskMateApi,
   DreamRun,
   HitRect,
+  AvatarHitMask,
   IntentionOutcome,
   IntentionView,
   KnowledgeView,
@@ -140,6 +141,11 @@ const api: DeskMateApi = {
 
   setHitRect: (rect: HitRect) =>
     ipcRenderer.invoke('avatar:hit-rect', rect) as Promise<void>,
+
+  setAvatarHitMask: (mask: AvatarHitMask) => ipcRenderer.send('avatar:hit-mask', mask),
+
+  setAvatarBubbleRect: (rect: HitRect | null) =>
+    ipcRenderer.send('avatar:bubble-rect', rect),
 
   beginAvatarDrag: () => ipcRenderer.send('avatar:drag-start'),
 

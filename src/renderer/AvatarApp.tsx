@@ -3,17 +3,6 @@ import type { AvatarConfig, HitRect, UtterancePlan } from '../shared/types';
 import Bubble from './Bubble';
 import Live2DStage from './Live2DStage';
 
-function unionRects(rects: HitRect[]): HitRect {
-  const valid = rects.filter((r) => r.w > 0 && r.h > 0);
-  if (valid.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
-
-  const left = Math.min(...valid.map((r) => r.x));
-  const top = Math.min(...valid.map((r) => r.y));
-  const right = Math.max(...valid.map((r) => r.x + r.w));
-  const bottom = Math.max(...valid.map((r) => r.y + r.h));
-  return { x: left, y: top, w: right - left, h: bottom - top };
-}
-
 export default function AvatarApp() {
   const [config, setConfig] = useState<AvatarConfig | null>(null);
   const [plan, setPlan] = useState<UtterancePlan | null>(null);
@@ -56,16 +45,15 @@ export default function AvatarApp() {
   }, []);
 
   useEffect(() => {
-    const bubble = bubbleRef.current;
-    const rects = [modelRect];
+    void window.deskmate.setHitRect(modelRect);
 
+    const bubble = bubbleRef.current;
     if (bubbleVisible && bubble) {
       const r = bubble.getBoundingClientRect();
-      rects.push({ x: r.x, y: r.y, w: r.width, h: r.height });
+      window.deskmate.setAvatarBubbleRect({ x: r.x, y: r.y, w: r.width, h: r.height });
+    } else {
+      window.deskmate.setAvatarBubbleRect(null);
     }
-
-    const union = unionRects(rects);
-    void window.deskmate.setHitRect(union);
   }, [modelRect, bubbleVisible, plan]);
 
   const closeBubble = useCallback(() => {
@@ -82,10 +70,6 @@ export default function AvatarApp() {
         onHitRect={onHitRect}
         onOpenPanel={onOpenPanel}
       />
-      <div className="avatar-presence">
-        <span className="presence-dot" />
-        同桌 · 在线
-      </div>
       <Bubble
         ref={bubbleRef}
         text={plan?.displayText ?? ''}

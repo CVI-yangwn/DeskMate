@@ -657,10 +657,13 @@ export class BrainService {
 
   getAvatarConfig(): AvatarConfig {
     const candidates = [
+      path.join(process.cwd(), 'config/avatar.json'),
+      path.join(app.getPath('userData'), 'config/avatar.json'),
+      path.join(app.getAppPath(), 'config/avatar.json'),
+      path.join(process.resourcesPath, 'config/avatar.json'),
+      // 旧版本留下的 Haru 配置，作为兜底
       path.join(process.cwd(), 'config/avatar.haru.json'),
       path.join(app.getPath('userData'), 'config/avatar.haru.json'),
-      path.join(app.getAppPath(), 'config/avatar.haru.json'),
-      path.join(process.resourcesPath, 'config/avatar.haru.json'),
     ];
 
     for (const file of candidates) {
@@ -669,7 +672,7 @@ export class BrainService {
       }
     }
 
-    throw new Error('找不到 config/avatar.haru.json');
+    throw new Error('找不到 config/avatar.json');
   }
 
   subscribe(listener: (status: AppStatus) => void): () => void {

@@ -1,0 +1,52 @@
+{
+  "schema": "deskmate.avatar/1",
+  "id": "hijiki",
+  "name": "小黑",
+  "model": "./live2d/hijiki/hijiki.model.json",
+  "scale": 0.6,
+  "anchor": [
+    0.5,
+    1.0
+  ],
+  "lipSync": {
+    "param": "PARAM_MOUTH_OPEN_Y",
+    "gain": 3.0,
+    "max": 1.0
+  },
+  "expressions": {
+    "neutral": null,
+    "smile": null,
+    "surprised": null,
+    "angry": null,
+    "sad": null,
+    "happy": null,
+    "serious": null,
+    "embarrassed": null,
+    "disappointed": null
+  },
+  "motions": {
+    "idle": [
+      "idle"
+    ],
+    "celebrate": [
+      "",
+      0
+    ],
+    "tease": [
+      "",
+      1
+    ],
+    "comfort": [
+      "",
+      2
+    ],
+    "think": [
+      "",
+      3
+    ]
+  },
+  "hitAreas": [
+    "Head",
+    "Body"
+  ]
+}

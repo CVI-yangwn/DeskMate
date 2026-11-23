@@ -238,7 +238,7 @@ export function KnowledgePanel({ lastDreamAt }: { lastDreamAt?: number }) {
   if (!view) {
     return (
       <section className="card knowledge-page">
-        <span className="eyebrow">知识</span>
+        <h1 className="page-title">知识</h1>
         <p className="muted">正在读知识库…</p>
         {error && <p className="knowledge-error">{error}</p>}
       </section>
@@ -254,7 +254,7 @@ export function KnowledgePanel({ lastDreamAt }: { lastDreamAt?: number }) {
     <section className="card knowledge-page">
       <div className="knowledge-head">
         <div>
-          <span className="eyebrow">知识</span>
+          <h1 className="page-title">知识</h1>
           <p>对话、活动和锚点，每晚收成自己的 wiki。</p>
         </div>
         <button className="memory-add knowledge-run" disabled={busy} onClick={() => void runNow()}>

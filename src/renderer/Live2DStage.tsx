@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as PIXI from 'pixi.js';
-import { Live2DModel } from 'pixi-live2d-display/cubism4';
+import { Live2DModel } from 'pixi-live2d-display';
 import type { AvatarConfig, HitRect, UtterancePlan } from '../shared/types';
 
 interface Props {
@@ -69,7 +69,8 @@ export default function Live2DStage({
         app.stage.addChild(model);
 
         layout();
-        model.motion('Idle').catch(() => undefined);
+        const idle = cfg.motions.idle?.[0] ?? 'idle';
+        model.motion(idle).catch(() => undefined);
       } catch (error) {
         console.error('Live2D 加载失败', error);
         setLoadError(String(error));
@@ -146,6 +147,59 @@ export default function Live2DStage({
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerCancel);
 
+    let maskTimer: number | null = null;
+
+    function scheduleHitMask() {
+      if (maskTimer) window.clearTimeout(maskTimer);
+      maskTimer = window.setTimeout(() => {
+        maskTimer = null;
+        publishHitMask();
+      }, 160);
+    }
+
+    // 用渲染结果生成低分辨率 alpha 掩码，主进程按猫的轮廓做点击穿透，
+    // 不再用整个窗口/模型矩形。
+    function publishHitMask() {
+      try {
+        const width = canvas.clientWidth || 240;
+        const height = canvas.clientHeight || 360;
+        if (!width || !height) return;
+
+        const extract = app.renderer.plugins.extract as {
+          pixels?: (target?: unknown) => Uint8Array;
+        };
+        if (typeof extract.pixels !== 'function') return;
+
+        // 不能直接读主画布（preserveDrawingBuffer=false 会读到空帧），
+        // 先渲染到一张同尺寸 RenderTexture，再取像素。
+        const target = PIXI.RenderTexture.create({ width, height, resolution: 1 });
+        app.renderer.render(app.stage, { renderTexture: target });
+        const pixels = extract.pixels(target);
+        target.destroy(true);
+
+        const rw = width;
+        const rh = height;
+        const cell = 4;
+        const cols = Math.ceil(width / cell);
+        const rows = Math.ceil(height / cell);
+        const mask = new Array<number>(cols * rows).fill(0);
+
+        for (let row = 0; row < rows; row += 1) {
+          for (let col = 0; col < cols; col += 1) {
+            const px = Math.floor((col + 0.5) * cell);
+            const py = Math.floor((row + 0.5) * cell);
+            if (px < 0 || py < 0 || px >= rw || py >= rh) continue;
+            const alpha = pixels[(py * rw + px) * 4 + 3];
+            if (alpha > 8) mask[row * cols + col] = 1;
+          }
+        }
+
+        window.deskmate.setAvatarHitMask({ width, height, cell, cols, rows, mask });
+      } catch (error) {
+        console.warn('生成 Live2D 命中掩码失败', error);
+      }
+    }
+
     function layout() {
       const model = modelRef.current;
       if (!model) return;
@@ -183,13 +237,17 @@ export default function Live2DStage({
           );
         }
       });
+      scheduleHitMask();
     }
 
     const onResize = () => layout();
     window.addEventListener('resize', onResize);
+    const resizeObserver = new ResizeObserver(() => layout());
+    resizeObserver.observe(canvas);
 
     return () => {
       cancelled = true;
+      resizeObserver.disconnect();
       window.removeEventListener('resize', onResize);
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
@@ -199,6 +257,7 @@ export default function Live2DStage({
         dragState = null;
         window.deskmate.endAvatarDrag();
       }
+      if (maskTimer) window.clearTimeout(maskTimer);
       modelRef.current = null;
       app.destroy(true);
       appRef.current = null;
@@ -232,28 +291,37 @@ export default function Live2DStage({
     if (!model) return;
 
     const core = model.internalModel.coreModel as unknown as {
-      setParameterValueById(id: string, value: number): void;
+      setParameterValueById?: (id: string, value: number) => void;
+      setParamFloat?: (id: string, value: number, weight?: number) => void;
+    };
+    const param = configRef.current?.lipSync.param ?? 'PARAM_MOUTH_OPEN_Y';
+    const setMouth = (value: number) => {
+      if (typeof core.setParameterValueById === 'function') {
+        core.setParameterValueById(param, value);
+      } else if (typeof core.setParamFloat === 'function') {
+        core.setParamFloat(param, value, 1);
+      }
     };
     const start = performance.now();
     let frame = 0;
 
     const tick = (now: number) => {
       if (now >= speakingUntil) {
-        core.setParameterValueById('ParamMouthOpenY', 0);
+        setMouth(0);
         return;
       }
 
       const t = (now - start) / 1000;
       const envelope = Math.min(1, (now - start) / 300);
       const mouth = (0.12 + 0.34 * Math.abs(Math.sin(t * 9)) + 0.08 * Math.sin(t * 23)) * envelope;
-      core.setParameterValueById('ParamMouthOpenY', Math.min(1, Math.max(0, mouth)));
+      setMouth(Math.min(1, Math.max(0, mouth)));
       frame = requestAnimationFrame(tick);
     };
 
     frame = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(frame);
-      core.setParameterValueById('ParamMouthOpenY', 0);
+      setMouth(0);
     };
   }, [speakingUntil]);
 
@@ -266,7 +334,7 @@ export default function Live2DStage({
         <div className="live2d-error">
           <strong>Live2D 加载失败</strong>
           <span>{loadError}</span>
-          <span>检查 live2dcubismcore.min.js 与 Haru 模型路径。</span>
+          <span>检查 live2d.min.js 和 config/avatar.json 里的模型路径。</span>
         </div>
       )}
       <canvas ref={canvasRef} className="live2d-canvas" />

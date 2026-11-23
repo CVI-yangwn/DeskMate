@@ -424,6 +424,15 @@ export interface HitRect {
   h: number;
 }
 
+export interface AvatarHitMask {
+  width: number;
+  height: number;
+  cell: number;
+  cols: number;
+  rows: number;
+  mask: number[];
+}
+
 export interface DeskMateApi {
   getStatus(): Promise<AppStatus>;
   getAvatarConfig(): Promise<AvatarConfig>;
@@ -471,6 +480,8 @@ export interface DeskMateApi {
   openPanel(): Promise<void>;
   closePanel(): Promise<void>;
   setHitRect(rect: HitRect): Promise<void>;
+  setAvatarHitMask(mask: AvatarHitMask): void;
+  setAvatarBubbleRect(rect: HitRect | null): void;
   beginAvatarDrag(): void;
   moveAvatar(dx: number, dy: number): void;
   endAvatarDrag(): void;
